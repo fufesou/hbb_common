@@ -1214,7 +1214,7 @@ impl PeerConfig {
                     }
                 }
                 if store {
-                    config.store(id);
+                    config.store_(id);
                 }
                 config
             }
@@ -1232,6 +1232,10 @@ impl PeerConfig {
 
     pub fn store(&self, id: &str) {
         let _lock = CONFIG.read().unwrap();
+        self.store_(id);
+    }
+
+    fn store_(&self, id: &str) {
         let mut config = self.clone();
         config.password =
             encrypt_vec_or_original(&config.password, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
@@ -1399,7 +1403,7 @@ impl PeerConfig {
         };
 
         let peers: Vec<_> = all[from..to]
-            .into_iter()
+            .iter()
             .map(|(id, t, p)| {
                 let c = PeerConfig::load(&id);
                 if c.info.platform.is_empty() {
