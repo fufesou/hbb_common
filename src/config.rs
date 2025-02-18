@@ -1214,7 +1214,7 @@ impl PeerConfig {
                     }
                 }
                 if store {
-                    config.store(id);
+                    config.store_(id);
                 }
                 config
             }
@@ -1232,6 +1232,10 @@ impl PeerConfig {
 
     pub fn store(&self, id: &str) {
         let _lock = CONFIG.read().unwrap();
+        self.store_(id);
+    }
+
+    fn store_(&self, id: &str) {
         let mut config = self.clone();
         config.password =
             encrypt_vec_or_original(&config.password, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
@@ -1269,55 +1273,149 @@ impl PeerConfig {
         Config::with_extension(Config::path(path))
     }
 
-    pub fn peers(id_filters: Option<Vec<String>>) -> Vec<(String, SystemTime, PeerConfig)> {
-        if let Ok(peers) = Config::path(PEERS).read_dir() {
-            if let Ok(peers) = peers
-                .map(|res| res.map(|e| e.path()))
-                .collect::<Result<Vec<_>, _>>()
-            {
-                let mut peers: Vec<_> = peers
-                    .iter()
-                    .filter(|p| {
-                        p.is_file()
-                            && p.extension().map(|p| p.to_str().unwrap_or("")) == Some("toml")
-                    })
-                    .map(|p| {
-                        let id = p
-                            .file_stem()
-                            .map(|p| p.to_str().unwrap_or(""))
-                            .unwrap_or("")
-                            .to_owned();
+    #[inline]
+    // The number of peers to load when showing the peers card list in the main window.
+    pub fn get_loading_batch_count() -> usize {
+        LocalConfig::get_option(keys::OPTION_PEERS_BATCH_COUNT)
+            .parse()
+            .unwrap_or(100)
+    }
 
-                        let id_decoded_string = if id.starts_with("base64_") && id.len() != 7 {
-                            let id_decoded = base64::decode(&id[7..], base64::Variant::Original)
-                                .unwrap_or_default();
-                            String::from_utf8_lossy(&id_decoded).as_ref().to_owned()
+    #[inline]
+    // The number of peers to load when inputting the ID in the connection field.
+    pub fn get_search_loading_batch_count() -> usize {
+        LocalConfig::get_option(keys::OPTION_SEARCH_PEERS_BATCH_COUNT)
+            .parse()
+            .unwrap_or(Self::get_loading_batch_count())
+    }
+
+    pub fn get_vec_id_modified_time_path(
+        id_filters: &Option<Vec<String>>,
+    ) -> Vec<(String, SystemTime, PathBuf)> {
+        if let Ok(peers) = Config::path(PEERS).read_dir() {
+            let mut vec_id_modified_time_path = peers
+                .into_iter()
+                .filter_map(|res| match res {
+                    Ok(res) => {
+                        let p = res.path();
+                        if p.is_file()
+                            && p.extension().map(|p| p.to_str().unwrap_or("")) == Some("toml")
+                        {
+                            Some(p)
                         } else {
-                            id
-                        };
-                        (id_decoded_string, p)
-                    })
-                    .filter(|(id, _)| {
-                        let Some(filters) = &id_filters else {
-                            return true;
-                        };
-                        filters.contains(id)
-                    })
-                    .map(|(id, p)| {
-                        let t = crate::get_modified_time(p);
-                        let c = PeerConfig::load(&id);
-                        if c.info.platform.is_empty() {
-                            fs::remove_file(p).ok();
+                            None
                         }
-                        (id, t, c)
-                    })
-                    .filter(|p| !p.2.info.platform.is_empty())
-                    .collect();
-                peers.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-                return peers;
+                    }
+                    _ => None,
+                })
+                .map(|p| {
+                    let id = p
+                        .file_stem()
+                        .map(|p| p.to_str().unwrap_or(""))
+                        .unwrap_or("")
+                        .to_owned();
+
+                    let id_decoded_string = if id.starts_with("base64_") && id.len() != 7 {
+                        let id_decoded =
+                            base64::decode(&id[7..], base64::Variant::Original).unwrap_or_default();
+                        String::from_utf8_lossy(&id_decoded).as_ref().to_owned()
+                    } else {
+                        id
+                    };
+                    (id_decoded_string, p)
+                })
+                .filter(|(id, _)| {
+                    let Some(filters) = id_filters else {
+                        return true;
+                    };
+                    filters.contains(id)
+                })
+                .map(|(id, p)| {
+                    let t = crate::get_modified_time(&p);
+                    (id, t, p)
+                })
+                .collect::<Vec<_>>();
+            vec_id_modified_time_path.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+            vec_id_modified_time_path
+        } else {
+            vec![]
+        }
+    }
+
+    #[inline]
+    async fn preload_file_async(path: PathBuf) {
+        let _ = tokio::fs::File::open(path).await;
+    }
+
+    #[tokio::main(flavor = "current_thread")]
+    async fn preload_peers_async() {
+        let now = std::time::Instant::now();
+        let vec_id_modified_time_path = Self::get_vec_id_modified_time_path(&None);
+        let batch_count = LocalConfig::get_option(keys::OPTION_PRELOAD_PEERS_BATCH_COUNT)
+            .parse()
+            .unwrap_or(100);
+        let total_count = vec_id_modified_time_path.len();
+        let mut futs = vec![];
+        for (_, _, path) in vec_id_modified_time_path.into_iter() {
+            futs.push(Self::preload_file_async(path));
+            if futs.len() >= batch_count {
+                futures::future::join_all(futs).await;
+                futs = vec![];
             }
         }
-        Default::default()
+        log::info!(
+            "Preload peers done in {:?}, batch_count: {}, total: {}",
+            now.elapsed(),
+            batch_count,
+            total_count
+        );
+    }
+
+    pub fn preload_peers() {
+        std::thread::spawn(|| {
+            Self::preload_peers_async();
+        });
+    }
+
+    pub fn peers(id_filters: Option<Vec<String>>) -> Vec<(String, SystemTime, PeerConfig)> {
+        let vec_id_modified_time_path = Self::get_vec_id_modified_time_path(&id_filters);
+        Self::batch_peers(
+            &vec_id_modified_time_path,
+            0,
+            Some(vec_id_modified_time_path.len()),
+        )
+        .0
+    }
+
+    pub fn batch_peers(
+        all: &Vec<(String, SystemTime, PathBuf)>,
+        from: usize,
+        to: Option<usize>,
+    ) -> (Vec<(String, SystemTime, PeerConfig)>, usize) {
+        if from >= all.len() {
+            return (vec![], 0);
+        }
+
+        let to = match to {
+            Some(to) => to.min(all.len()),
+            None => {
+                let batch_count = Self::get_loading_batch_count();
+                (from + batch_count).min(all.len())
+            }
+        };
+
+        let peers: Vec<_> = all[from..to]
+            .iter()
+            .map(|(id, t, p)| {
+                let c = PeerConfig::load(&id);
+                if c.info.platform.is_empty() {
+                    fs::remove_file(p).ok();
+                }
+                (id.clone(), t.clone(), c)
+            })
+            .filter(|p| !p.2.info.platform.is_empty())
+            .collect();
+        (peers, to)
     }
 
     pub fn exists(id: &str) -> bool {
@@ -2245,6 +2343,10 @@ pub mod keys {
         "enable-android-software-encoding-half-scale";
     pub const OPTION_ENABLE_TRUSTED_DEVICES: &str = "enable-trusted-devices";
     pub const OPTION_AV1_TEST: &str = "av1-test";
+
+    pub const OPTION_PRELOAD_PEERS_BATCH_COUNT: &str = "preload-peers-batch-count";
+    pub const OPTION_PEERS_BATCH_COUNT: &str = "peers-batch-count";
+    pub const OPTION_SEARCH_PEERS_BATCH_COUNT: &str = "search-peers-batch-count";
 
     // buildin options
     pub const OPTION_DISPLAY_NAME: &str = "display-name";
