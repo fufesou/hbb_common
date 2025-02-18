@@ -1214,7 +1214,7 @@ impl PeerConfig {
                     }
                 }
                 if store {
-                    config.store(id);
+                    config.store_(id);
                 }
                 config
             }
@@ -1232,6 +1232,10 @@ impl PeerConfig {
 
     pub fn store(&self, id: &str) {
         let _lock = CONFIG.read().unwrap();
+        self.store_(id);
+    }
+
+    fn store_(&self, id: &str) {
         let mut config = self.clone();
         config.password =
             encrypt_vec_or_original(&config.password, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
@@ -1269,19 +1273,11 @@ impl PeerConfig {
         Config::with_extension(Config::path(path))
     }
 
-    #[inline]
-    pub fn get_loading_batch_count() -> usize {
-        LocalConfig::get_option(keys::OPTION_PEERS_BATCH_COUNT)
-            .parse()
-            .unwrap_or(100)
-    }
-
-    #[inline]
-    pub fn get_search_loading_batch_count() -> usize {
-        LocalConfig::get_option(keys::OPTION_SEARCH_PEERS_BATCH_COUNT)
-            .parse()
-            .unwrap_or(Self::get_loading_batch_count())
-    }
+    // The number of peers to load in the first round when showing the peers card list in the main window.
+    // When there're too many peers, loading all of them at once will take a long time.
+    // We can load them in two rouds, the first round loads the first 100 peers, and the second round loads the rest.
+    // Then the UI will show the first 100 peers first, and the rest will be loaded and shown later.
+    pub const BATCH_LOADING_COUNT: usize = 300;
 
     pub fn get_vec_id_modified_time_path(
         id_filters: &Option<Vec<String>>,
@@ -1338,33 +1334,44 @@ impl PeerConfig {
 
     #[inline]
     async fn preload_file_async(path: PathBuf) {
-        let _ = tokio::fs::File::open(path).await;
+        let err = tokio::fs::File::open(path).await;
+        if let Err(err) = err {
+            log::error!(
+                "REMOVE ME ================================= Failed to preload file: {}",
+                err
+            );
+        }
     }
 
     #[tokio::main(flavor = "current_thread")]
     async fn preload_peers_async() {
         let now = std::time::Instant::now();
         let vec_id_modified_time_path = Self::get_vec_id_modified_time_path(&None);
-        let batch_count = LocalConfig::get_option(keys::OPTION_PRELOAD_PEERS_BATCH_COUNT)
-            .parse()
-            .unwrap_or(100);
         let total_count = vec_id_modified_time_path.len();
         let mut futs = vec![];
         for (_, _, path) in vec_id_modified_time_path.into_iter() {
             futs.push(Self::preload_file_async(path));
-            if futs.len() >= batch_count {
+            if futs.len() >= Self::BATCH_LOADING_COUNT {
                 futures::future::join_all(futs).await;
                 futs = vec![];
             }
         }
+        if !futs.is_empty() {
+            futures::future::join_all(futs).await;
+        }
         log::info!(
-            "Preload peers done in {:?}, batch_count: {}, total: {}",
+            "REMOVE ME ================================ Preload peers done in {:?}, batch_count: {}, total: {}",
             now.elapsed(),
-            batch_count,
+            Self::BATCH_LOADING_COUNT,
             total_count
         );
     }
 
+    // We have to preload all peers in a background thread.
+    // Because we find that opening files the first time after the system (Windows) booting will be very slow, up to 200~400ms.
+    // The reason is that the Windows has "Microsoft Defender Antivirus Service" running in the background, which will scan the file when it's opened the first time.
+    // So we have to preload all peers in a background thread to avoid the delay when opening the file the first time.
+    // We can temporarily stop "Microsoft Defender Antivirus Service" or add the fold to the white list, to verify this. But don't do this in the release version.
     pub fn preload_peers() {
         std::thread::spawn(|| {
             Self::preload_peers_async();
@@ -1393,13 +1400,12 @@ impl PeerConfig {
         let to = match to {
             Some(to) => to.min(all.len()),
             None => {
-                let batch_count = Self::get_loading_batch_count();
-                (from + batch_count).min(all.len())
+                (from + Self::BATCH_LOADING_COUNT).min(all.len())
             }
         };
 
         let peers: Vec<_> = all[from..to]
-            .into_iter()
+            .iter()
             .map(|(id, t, p)| {
                 let c = PeerConfig::load(&id);
                 if c.info.platform.is_empty() {
@@ -2304,6 +2310,7 @@ pub mod keys {
     pub const OPTION_ENABLE_KEYBOARD: &str = "enable-keyboard";
     pub const OPTION_ENABLE_CLIPBOARD: &str = "enable-clipboard";
     pub const OPTION_ENABLE_FILE_TRANSFER: &str = "enable-file-transfer";
+    pub const OPTION_ENABLE_CAMERA: &str = "enable-camera";
     pub const OPTION_ENABLE_AUDIO: &str = "enable-audio";
     pub const OPTION_ENABLE_TUNNEL: &str = "enable-tunnel";
     pub const OPTION_ENABLE_REMOTE_RESTART: &str = "enable-remote-restart";
@@ -2337,10 +2344,6 @@ pub mod keys {
         "enable-android-software-encoding-half-scale";
     pub const OPTION_ENABLE_TRUSTED_DEVICES: &str = "enable-trusted-devices";
     pub const OPTION_AV1_TEST: &str = "av1-test";
-
-    pub const OPTION_PRELOAD_PEERS_BATCH_COUNT: &str = "preload-peers-batch-count";
-    pub const OPTION_PEERS_BATCH_COUNT: &str = "peers-batch-count";
-    pub const OPTION_SEARCH_PEERS_BATCH_COUNT: &str = "search-peers-batch-count";
 
     // buildin options
     pub const OPTION_DISPLAY_NAME: &str = "display-name";
