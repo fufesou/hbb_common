@@ -1353,7 +1353,7 @@ impl PeerConfig {
         }
     }
 
-    #[tokio::main(flavor = "multi_thread")]
+    #[tokio::main(flavor = "current_thread")]
     async fn preload_peers_async() {
         let now = std::time::Instant::now();
         let vec_id_modified_time_path = Self::get_vec_id_modified_time_path(&None);
