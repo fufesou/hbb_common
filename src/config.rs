@@ -1357,14 +1357,13 @@ impl PeerConfig {
     async fn preload_peers_async() {
         let now = std::time::Instant::now();
         let vec_id_modified_time_path = Self::get_vec_id_modified_time_path(&None);
-        let batch_count = LocalConfig::get_option(keys::OPTION_PRELOAD_PEERS_BATCH_COUNT)
-            .parse()
-            .unwrap_or(100);
+        let batch_count = Self::get_loading_batch_count();
         let total_count = vec_id_modified_time_path.len();
+        let is_first_batch = true;
         let mut futs = vec![];
         for (_, _, path) in vec_id_modified_time_path.into_iter() {
             futs.push(Self::preload_file_async(path));
-            if futs.len() >= batch_count {
+            if is_first_batch && futs.len() >= batch_count {
                 futures::future::join_all(futs).await;
                 futs = vec![];
             }
