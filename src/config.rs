@@ -1344,7 +1344,10 @@ impl PeerConfig {
 
     #[inline]
     async fn preload_file_async(path: PathBuf) {
-        let _ = tokio::fs::File::open(path).await;
+        let err = tokio::fs::File::open(path).await;
+        if let Err(err) = err {
+            log::error!("REMOVE ME ================================= Failed to preload file: {}", err);
+        }
     }
 
     #[tokio::main(flavor = "current_thread")]
@@ -1364,7 +1367,7 @@ impl PeerConfig {
             }
         }
         log::info!(
-            "Preload peers done in {:?}, batch_count: {}, total: {}",
+            "REMOVE ME ===================================== Preload peers done in {:?}, batch_count: {}, total: {}",
             now.elapsed(),
             batch_count,
             total_count
