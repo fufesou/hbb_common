@@ -452,6 +452,8 @@ message FileTransferSendRequest {
   string path = 2;
   bool include_hidden = 3;
   int32 file_num = 4;
+  // Is this request triggered by "copy&paste"
+  bool is_copy_paste = 5;
 }
 
 message FileTransferSendConfirmRequest {
@@ -474,6 +476,8 @@ message FileTransferReceiveRequest {
   repeated FileEntry files = 3;
   int32 file_num = 4;
   uint64 total_size = 5;
+  // Is this request triggered by "copy&paste"
+  bool is_copy_paste = 6;
 }
 
 message FileRemoveDir {
@@ -544,6 +548,16 @@ message CliprdrFileContentsResponse {
 message CliprdrTryEmpty {
 }
 
+// Desktop(Copy) -> macOS(Paste)
+// Use file transfer to reuse the file pasting.
+// As file transfer jobs are started by the controlling side.
+// Pasting on macOS(the controlled side) should tell the controlling side
+// to send a `FileAction` message with `FileTransferReceiveRequest`.
+message CliprdrReceiveFiles {
+  FileTransferReceiveRequest receive = 1;
+  string from_dir = 2;
+}
+
 message Cliprdr {
   oneof union {
     CliprdrMonitorReady ready = 1;
@@ -554,6 +568,7 @@ message Cliprdr {
     CliprdrFileContentsRequest file_contents_request = 6;
     CliprdrFileContentsResponse file_contents_response = 7;
     CliprdrTryEmpty try_empty = 8;
+    CliprdrReceiveFiles receive = 9;
   }
 }
 

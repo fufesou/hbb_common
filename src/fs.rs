@@ -348,7 +348,32 @@ impl TransferJob {
         log::info!("new read {}", path);
         let files = get_recursive_files(&path, show_hidden)?;
         let total_size = files.iter().map(|x| x.size).sum();
-        Ok(Self {
+        Ok(Self::new_read_with_files(
+            id,
+            remote,
+            path,
+            files,
+            file_num,
+            total_size,
+            show_hidden,
+            is_remote,
+            enable_overwrite_detection,
+        ))
+    }
+
+    pub fn new_read_with_files(
+        id: i32,
+        remote: String,
+        path: String,
+        files: Vec<FileEntry>,
+        file_num: i32,
+        total_size: u64,
+        show_hidden: bool,
+        is_remote: bool,
+        enable_overwrite_detection: bool,
+    ) -> Self {
+        log::info!("new read {}", path);
+        Self {
             id,
             remote,
             path: get_path(&path),
@@ -359,7 +384,7 @@ impl TransferJob {
             total_size,
             enable_overwrite_detection,
             ..Default::default()
-        })
+        }
     }
 
     #[inline]
@@ -744,6 +769,7 @@ pub fn new_receive(
     file_num: i32,
     files: Vec<FileEntry>,
     total_size: u64,
+    is_copy_paste: bool,
 ) -> Message {
     let mut action = FileAction::new();
     action.set_receive(FileTransferReceiveRequest {
@@ -752,6 +778,7 @@ pub fn new_receive(
         files,
         file_num,
         total_size,
+        is_copy_paste,
         ..Default::default()
     });
     let mut msg_out = Message::new();
@@ -760,7 +787,13 @@ pub fn new_receive(
 }
 
 #[inline]
-pub fn new_send(id: i32, path: String, file_num: i32, include_hidden: bool) -> Message {
+pub fn new_send(
+    id: i32,
+    path: String,
+    file_num: i32,
+    include_hidden: bool,
+    is_copy_paste: bool,
+) -> Message {
     log::info!("new send: {}, id: {}", path, id);
     let mut action = FileAction::new();
     action.set_send(FileTransferSendRequest {
@@ -768,6 +801,7 @@ pub fn new_send(id: i32, path: String, file_num: i32, include_hidden: bool) -> M
         path,
         include_hidden,
         file_num,
+        is_copy_paste,
         ..Default::default()
     });
     let mut msg_out = Message::new();
