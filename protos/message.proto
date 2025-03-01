@@ -452,11 +452,20 @@ message FileTransferError {
   sint32 file_num = 3;
 }
 
+enum FileTransferType {
+    // Transfers files or directories from one side to the other.
+    // This is the default type.
+    FileTransfer = 1,
+    // Transfers a file specifically for remote printing.
+    PrintFile = 2,
+}
+
 message FileTransferSendRequest {
   int32 id = 1;
   string path = 2;
   bool include_hidden = 3;
   int32 file_num = 4;
+  FileTransferType transfer_type = 5;
 }
 
 message FileTransferSendConfirmRequest {
