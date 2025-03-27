@@ -726,6 +726,7 @@ impl TransferJob {
             }
         }
         unsafe { buf.set_len(offset) };
+        log::info!("REMOVE ME ============================ offset: {}, finished size:{}", offset, self.finished_size + offset as u64);
         if offset == 0 {
             if matches!(self.data_source, DataSource::MemoryCursor(_)) {
                 self.data_stream.take();
