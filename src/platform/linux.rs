@@ -218,11 +218,19 @@ pub fn is_session_locked(sid: &str) -> bool {
 pub fn run_cmds(cmds: &str) -> ResultType<String> {
     let output = std::process::Command::new("sh")
         .args(vec!["-c", cmds])
-        .output()?;
+        .output();
+    log::info!("=========================== run cmds: {}, res: {:?}", cmds, &output);
+    if let Err(e) = &output {
+        let msg = format!("Failed to run command '{}': {}", cmds, e);
+        log::error!("{}", msg);
+        crate::bail!(msg);
+    }
+    let output = output?;
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 pub fn run_cmds_trim_newline(cmds: &str) -> ResultType<String> {
+    log::info!("=========================== run cmds trim newline: {}", cmds);
     let output = std::process::Command::new("sh")
         .args(vec!["-c", cmds])
         .output()?;
@@ -235,6 +243,7 @@ pub fn run_cmds_trim_newline(cmds: &str) -> ResultType<String> {
 }
 
 fn run_loginctl(args: Option<Vec<&str>>) -> std::io::Result<std::process::Output> {
+    log::info!("=========================== run loginctl, args: {:?}", &args);
     if std::env::var("FLATPAK_ID").is_ok() {
         let mut l_args = String::from("loginctl");
         if let Some(a) = args.as_ref() {
