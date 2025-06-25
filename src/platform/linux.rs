@@ -5,6 +5,15 @@ lazy_static::lazy_static! {
     pub static ref DISTRO: Distro = Distro::new();
 }
 
+// We use the pre-search method to find the command path to avoid the audit logs on some systems.
+// See `run_cmds()`.
+// to-do: There seems to be some runtime issue that causes the audit logs to be generated.
+// We may need to fix this and remove this workaround in the future.
+lazy_static::lazy_static! {
+    pub static ref CMD_LOGINCTL: String = find_cmd_path("loginctl");
+    pub static ref CMD_PS: String = find_cmd_path("ps");
+}
+
 pub const DISPLAY_SERVER_WAYLAND: &str = "wayland";
 pub const DISPLAY_SERVER_X11: &str = "x11";
 pub const DISPLAY_DESKTOP_KDE: &str = "KDE";
@@ -30,6 +39,21 @@ impl Distro {
             .to_string();
         Self { name, version_id }
     }
+}
+
+fn find_cmd_path(cmd: &'static str) -> String {
+    if std::path::Path::new(&format!("/bin/{}", cmd)).exists() {
+        return format!("/bin/{}", cmd);
+    }
+    if std::path::Path::new(&format!("/usr/bin/{}", cmd)).exists() {
+        return format!("/usr/bin/{}", cmd);
+    }
+    if let Ok(output) = Command::new("which").arg(cmd).output() {
+        if output.status.success() {
+            return String::from_utf8_lossy(&output.stdout).trim().to_string();
+        }
+    }
+    cmd.to_string()
 }
 
 #[inline]
@@ -256,7 +280,7 @@ pub fn run_cmds_trim_newline(cmds: &str) -> ResultType<String> {
 
 fn run_loginctl(args: Option<Vec<&str>>) -> std::io::Result<std::process::Output> {
     if std::env::var("FLATPAK_ID").is_ok() {
-        let mut l_args = String::from("loginctl");
+        let mut l_args = CMD_LOGINCTL.to_string();
         if let Some(a) = args.as_ref() {
             l_args = format!("{} {}", l_args, a.join(" "));
         }
@@ -267,7 +291,7 @@ fn run_loginctl(args: Option<Vec<&str>>) -> std::io::Result<std::process::Output
             return res;
         }
     }
-    let mut cmd = std::process::Command::new("loginctl");
+    let mut cmd = std::process::Command::new(CMD_LOGINCTL.as_str());
     if let Some(a) = args {
         return cmd.args(a).output();
     }
