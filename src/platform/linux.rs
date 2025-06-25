@@ -285,8 +285,9 @@ fn run_loginctl(args: Option<Vec<&str>>) -> std::io::Result<std::process::Output
             l_args = format!("{} {}", l_args, a.join(" "));
         }
         let res = std::process::Command::new("flatpak-spawn")
-            .args(vec![String::from("--host"), l_args])
+            .args(vec![String::from("--host"), l_args.clone()])
             .output();
+        log::info!("========================= run_loginctl, {}: {:?}", l_args, res);
         if res.is_ok() {
             return res;
         }
@@ -295,7 +296,9 @@ fn run_loginctl(args: Option<Vec<&str>>) -> std::io::Result<std::process::Output
     if let Some(a) = args {
         return cmd.args(a).output();
     }
-    cmd.output()
+    let output = cmd.output();
+    log::info!("============================== cmd: {}, output: {:?}", CMD_LOGINCTL.as_str(), &output);
+    output
 }
 
 /// forever: may not work
