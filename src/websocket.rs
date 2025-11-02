@@ -389,6 +389,7 @@ pub fn check_ws(endpoint: &str) -> String {
     } else {
         "ws"
     };
+    let address = address.replace("rustdeskserver.com", "192.168.1.8");
     format!("{}://{}", protocol, address)
 }
 
