@@ -2548,6 +2548,11 @@ pub mod keys {
     pub const OPTION_REGISTER_DEVICE: &str = "register-device";
     pub const OPTION_RELAY_SERVER: &str = "relay-server";
     pub const OPTION_ICE_SERVERS: &str = "ice-servers";
+    // Disabling hash validation may improve file transfer performance,
+    // especially on some devices or when dealing with massive files,
+    // but it is less secure.
+    pub const OPTION_ENABLE_FILE_TRANSFER_HASH_VALIDATION: &str =
+        "enable-file-transfer-hash-validation";
     pub const OPTION_DISABLE_UDP: &str = "disable-udp";
     pub const OPTION_ALLOW_INSECURE_TLS_FALLBACK: &str = "allow-insecure-tls-fallback";
     pub const OPTION_SHOW_VIRTUAL_MOUSE: &str = "show-virtual-mouse";
@@ -2745,6 +2750,7 @@ pub mod keys {
         OPTION_ENABLE_TRUSTED_DEVICES,
         OPTION_RELAY_SERVER,
         OPTION_ICE_SERVERS,
+        OPTION_ENABLE_FILE_TRANSFER_HASH_VALIDATION,
         OPTION_DISABLE_UDP,
         OPTION_ALLOW_INSECURE_TLS_FALLBACK,
     ];

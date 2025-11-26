@@ -10,6 +10,7 @@ use std::{
 
 use serde_derive::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufStream as TokioBufStream},
@@ -19,8 +20,158 @@ use crate::{anyhow::anyhow, bail, get_version_number, message_proto::*, ResultTy
 // https://doc.rust-lang.org/std/os/windows/fs/trait.MetadataExt.html
 use crate::{
     compress::{compress, decompress},
-    config::Config,
+    config::{self, Config},
 };
+
+/// Maximum bytes to hash for large file validation (1 MB)
+pub const MAX_HASH_BYTES: u64 = 1_048_576;
+/// Buffer size for hash computation (8 KB)
+const HASH_BUFFER_SIZE: usize = 8192;
+/// Minimum limit for hash computation to ensure meaningful sampling
+const MIN_HASH_LIMIT: u64 = 2;
+
+/// Internal helper: compute hash ranges for a file.
+/// Returns (should_hash_entire_file, half_limit) or None if should skip.
+fn compute_hash_params(file_size: u64, max_bytes: Option<u64>) -> Option<(bool, u64)> {
+    let limit = match max_bytes {
+        Some(0) => return None,
+        Some(l) => l.max(MIN_HASH_LIMIT),
+        None => file_size,
+    };
+
+    if file_size == 0 {
+        return None;
+    }
+
+    if file_size <= limit {
+        Some((true, 0))
+    } else {
+        Some((false, limit / 2))
+    }
+}
+
+/// Compute SHA-256 hash of a file with optional byte limit.
+///
+/// Strategy:
+/// - For files <= max_bytes: compute hash of entire file
+/// - For files > max_bytes: compute hash of first half + last half
+///   (e.g., with max_bytes=10MB, hash first 5MB + last 5MB)
+///
+/// This provides good protection against both header and tail modifications
+/// while maintaining performance for large files.
+pub async fn compute_file_hash_async(
+    file: &mut File,
+    max_bytes: Option<u64>,
+) -> ResultType<Option<String>> {
+    let file_size = file.metadata().await?.len();
+
+    let (hash_entire, half_limit) = match compute_hash_params(file_size, max_bytes) {
+        Some(params) => params,
+        None => return Ok(None),
+    };
+
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; HASH_BUFFER_SIZE];
+
+    if hash_entire {
+        file.seek(std::io::SeekFrom::Start(0)).await?;
+        loop {
+            let n = file.read(&mut buffer).await?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+    } else {
+        // Hash first half
+        file.seek(std::io::SeekFrom::Start(0)).await?;
+        let mut total_read = 0u64;
+        while total_read < half_limit {
+            let to_read = std::cmp::min(buffer.len() as u64, half_limit - total_read) as usize;
+            let n = file.read(&mut buffer[..to_read]).await?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+            total_read += n as u64;
+        }
+
+        // Hash last half
+        file.seek(std::io::SeekFrom::Start(file_size - half_limit))
+            .await?;
+        total_read = 0;
+        while total_read < half_limit {
+            let to_read = std::cmp::min(buffer.len() as u64, half_limit - total_read) as usize;
+            let n = file.read(&mut buffer[..to_read]).await?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+            total_read += n as u64;
+        }
+    }
+
+    file.seek(std::io::SeekFrom::Start(0)).await?;
+    Ok(Some(format!("{:x}", hasher.finalize())))
+}
+
+/// Compute SHA-256 hash of a file with optional byte limit (synchronous version).
+pub fn compute_file_hash_sync(
+    file: &mut std::fs::File,
+    max_bytes: Option<u64>,
+) -> ResultType<Option<String>> {
+    use std::io::{Read, Seek};
+
+    let file_size = file.metadata()?.len();
+
+    let (hash_entire, half_limit) = match compute_hash_params(file_size, max_bytes) {
+        Some(params) => params,
+        None => return Ok(None),
+    };
+
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; HASH_BUFFER_SIZE];
+
+    if hash_entire {
+        file.seek(std::io::SeekFrom::Start(0))?;
+        loop {
+            let n = file.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+    } else {
+        // Hash first half
+        file.seek(std::io::SeekFrom::Start(0))?;
+        let mut total_read = 0u64;
+        while total_read < half_limit {
+            let to_read = std::cmp::min(buffer.len() as u64, half_limit - total_read) as usize;
+            let n = file.read(&mut buffer[..to_read])?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+            total_read += n as u64;
+        }
+
+        // Hash last half
+        file.seek(std::io::SeekFrom::Start(file_size - half_limit))?;
+        total_read = 0;
+        while total_read < half_limit {
+            let to_read = std::cmp::min(buffer.len() as u64, half_limit - total_read) as usize;
+            let n = file.read(&mut buffer[..to_read])?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+            total_read += n as u64;
+        }
+    }
+
+    file.seek(std::io::SeekFrom::Start(0))?;
+    Ok(Some(format!("{:x}", hasher.finalize())))
+}
 
 static NEXT_JOB_ID: AtomicI32 = AtomicI32::new(1);
 
@@ -414,6 +565,8 @@ pub struct TransferJob {
     default_overwrite_strategy: Option<bool>,
     #[serde(skip_serializing)]
     digest: FileDigest,
+    #[serde(skip_serializing)]
+    file_hashes: Vec<Option<String>>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -520,6 +673,49 @@ impl TransferJob {
             enable_overwrite_detection,
             ..Default::default()
         })
+    }
+
+    pub fn new_read_with_validated_files(
+        id: i32,
+        r#type: JobType,
+        remote: String,
+        data_source: DataSource,
+        validated_files: Vec<FileEntry>,
+        file_hashes: Vec<Option<String>>,
+        is_remote: bool,
+        enable_overwrite_detection: bool,
+    ) -> Self {
+        log::info!("new read with validated files {}", data_source);
+        if file_hashes.len() != validated_files.len() {
+            debug_assert_eq!(
+                file_hashes.len(),
+                validated_files.len(),
+                "file_hashes length ({}) must match validated_files length ({})",
+                file_hashes.len(),
+                validated_files.len(),
+            );
+            log::warn!(
+                "TransferJob::new_read_with_validated_files: file_hashes length ({}) \
+                 does not match validated_files length ({}), normalizing",
+                file_hashes.len(),
+                validated_files.len(),
+            );
+        }
+        let total_size = validated_files.iter().map(|x| x.size).sum();
+        Self {
+            id,
+            r#type,
+            remote,
+            data_source,
+            file_num: 0,
+            show_hidden: false,
+            is_remote,
+            files: validated_files,
+            total_size,
+            enable_overwrite_detection,
+            file_hashes,
+            ..Default::default()
+        }
     }
 
     pub async fn get_buf_data(self) -> ResultType<Option<Vec<u8>>> {
@@ -701,6 +897,62 @@ impl TransferJob {
         }
     }
 
+    #[inline]
+    fn advance_to_next_file_on_error(&mut self) {
+        self.file_num += 1;
+        self.file_confirmed = false;
+        self.file_is_waiting = false;
+    }
+
+    /// Validate file size/mtime and optional hash against expected metadata.
+    async fn validate_file(&self, file: &mut File, file_index: usize) -> ResultType<()> {
+        let meta = file.metadata().await?;
+        let expected_file = &self.files[file_index];
+        let current_size = meta.len();
+        let current_modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        if current_size != expected_file.size || current_modified != expected_file.modified_time {
+            bail!(
+                "File modified: expected size={}, time={}, got size={}, time={}",
+                expected_file.size,
+                expected_file.modified_time,
+                current_size,
+                current_modified
+            );
+        }
+
+        if config::Config::get_bool_option(
+            config::keys::OPTION_ENABLE_FILE_TRANSFER_HASH_VALIDATION,
+        ) {
+            if let Some(expected_hash) = self.file_hashes.get(file_index).and_then(|h| h.as_ref()) {
+                // `compute_file_hash_async` always seeks the file back to the start
+                // before returning so subsequent streaming begins from offset 0.
+                match compute_file_hash_async(file, Some(MAX_HASH_BYTES)).await {
+                    Ok(Some(current_hash)) => {
+                        if &current_hash != expected_hash {
+                            bail!(
+                                "File hash mismatch: expected={}, got={}",
+                                expected_hash,
+                                current_hash
+                            );
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        bail!("Failed to compute file hash: {}", e);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn init_data_stream(&mut self, stream: &mut crate::Stream) -> ResultType<()> {
         let file_num = self.file_num as usize;
         match &mut self.data_source {
@@ -712,15 +964,23 @@ impl TransferJob {
                 };
                 if self.data_stream.is_none() {
                     match File::open(Self::join(p, &self.files[file_num].name)).await {
-                        Ok(file) => {
+                        // On success, perform metadata/hash validation first. Any error
+                        // is propagated and we advance to the next file so the read loop
+                        // won't get stuck on an invalid entry.
+                        Ok(mut file) => {
+                            if let Err(e) = self.validate_file(&mut file, file_num).await {
+                                self.advance_to_next_file_on_error();
+                                return Err(e);
+                            }
+
                             self.data_stream = Some(DataStream::FileStream(file));
                             self.file_confirmed = false;
                             self.file_is_waiting = false;
                         }
+                        // On open error, behave the same as validation failure: advance
+                        // to next file and return the error.
                         Err(err) => {
-                            self.file_num += 1;
-                            self.file_confirmed = false;
-                            self.file_is_waiting = false;
+                            self.advance_to_next_file_on_error();
                             return Err(err.into());
                         }
                     }
@@ -753,19 +1013,22 @@ impl TransferJob {
         }
 
         let file_num = self.file_num as usize;
-        let name: &str;
-        match &mut self.data_source {
-            DataSource::FilePath(..) => {
+        let name = match &self.data_source {
+            DataSource::FilePath(p) => {
                 if file_num >= self.files.len() {
                     self.data_stream.take();
                     return Ok(None);
                 };
-                name = &self.files[file_num].name;
+                if self.files.len() == 1 && self.files[file_num].name.is_empty() {
+                    p.file_name()
+                        .map(|p| p.to_str().unwrap_or(""))
+                        .unwrap_or("")
+                } else {
+                    &self.files[file_num].name
+                }
             }
-            DataSource::MemoryCursor(..) => {
-                name = "";
-            }
-        }
+            DataSource::MemoryCursor(..) => "",
+        };
         const BUF_SIZE: usize = 128 * 1024;
         let mut buf: Vec<u8> = vec![0; BUF_SIZE];
         let mut compressed = false;
