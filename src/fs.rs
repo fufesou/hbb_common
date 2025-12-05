@@ -745,6 +745,67 @@ impl TransferJob {
         Ok(())
     }
 
+    /// Initialize data stream for CM (Connection Manager) use.
+    /// Returns digest info if overwrite detection is needed.
+    pub async fn init_data_stream_cm(&mut self) -> ResultType<Option<(i32, i32, u64, u64, bool)>> {
+        let file_num = self.file_num as usize;
+        match &mut self.data_source {
+            DataSource::FilePath(p) => {
+                if file_num >= self.files.len() {
+                    // job done
+                    self.data_stream.take();
+                    return Ok(None);
+                };
+                if self.data_stream.is_none() {
+                    match File::open(Self::join(p, &self.files[file_num].name)).await {
+                        Ok(file) => {
+                            self.data_stream = Some(DataStream::FileStream(file));
+                            self.file_confirmed = false;
+                            self.file_is_waiting = false;
+                        }
+                        Err(err) => {
+                            self.file_num += 1;
+                            self.file_confirmed = false;
+                            self.file_is_waiting = false;
+                            return Err(err.into());
+                        }
+                    }
+                }
+            }
+            DataSource::MemoryCursor(c) => {
+                if self.data_stream.is_none() {
+                    let mut t = std::io::Cursor::new(Vec::new());
+                    std::mem::swap(&mut t, c);
+                    self.data_stream = Some(DataStream::BufStream(TokioBufStream::new(t)));
+                }
+            }
+        }
+        // Return digest info for overwrite detection
+        if self.r#type == JobType::Generic {
+            if self.enable_overwrite_detection && !self.file_confirmed() {
+                if !self.file_is_waiting() {
+                    let digest = self.get_current_digest().await?;
+                    self.set_file_is_waiting(true);
+                    return Ok(Some(digest));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Get current file digest info (id, file_num, file_size, last_modified, is_resume)
+    pub async fn get_current_digest(&self) -> ResultType<(i32, i32, u64, u64, bool)> {
+        let meta = match self.data_stream.as_ref().ok_or(anyhow!("file is None"))? {
+            DataStream::FileStream(file) => file.metadata().await?,
+            DataStream::BufStream(_) => bail!("No need to send digest for buf stream"),
+        };
+        let last_modified = meta
+            .modified()?
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_secs();
+        Ok((self.id, self.file_num, meta.len(), last_modified, self.is_resume))
+    }
+
     pub async fn read(&mut self) -> ResultType<Option<FileTransferBlock>> {
         if self.r#type == JobType::Generic {
             if self.enable_overwrite_detection && !self.file_confirmed() {
