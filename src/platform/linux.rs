@@ -425,6 +425,10 @@ pub fn get_wayland_displays() -> ResultType<Vec<WaylandDisplayInfo>> {
                     let refresh_rate = mode.refresh_rate;
                     let name = info.name.clone().unwrap_or_default();
                     let logical_size = info.logical_size;
+                    log::info!(
+                        "============== Wayland display: location=({}, {}), physical_size=({}, {}), logical_size={:?}",
+                        x, y, width, height, logical_size
+                    );
                     display_infos.push(WaylandDisplayInfo {
                         name,
                         x,
