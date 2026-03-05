@@ -114,6 +114,11 @@ pub const RELAY_PORT: i32 = 21117;
 pub const WS_RENDEZVOUS_PORT: i32 = 21118;
 pub const WS_RELAY_PORT: i32 = 21119;
 
+#[inline]
+pub fn is_service_ipc_postfix(postfix: &str) -> bool {
+    postfix == "_service" || postfix.starts_with("_service_")
+}
+
 macro_rules! serde_field_string {
     ($default_func:ident, $de_func:ident, $default_expr:expr) => {
         fn $default_func() -> String {
@@ -735,14 +740,28 @@ impl Config {
         }
         #[cfg(not(windows))]
         {
+            #[cfg(target_os = "android")]
             use std::os::unix::fs::PermissionsExt;
             #[cfg(target_os = "android")]
             let mut path: PathBuf =
                 format!("{}/{}", *APP_DIR.read().unwrap(), *APP_NAME.read().unwrap()).into();
-            #[cfg(not(target_os = "android"))]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let mut path: PathBuf = {
+                if is_service_ipc_postfix(postfix) {
+                    format!("/tmp/{}-service", *APP_NAME.read().unwrap()).into()
+                } else {
+                    let uid = unsafe { libc::geteuid() };
+                    format!("/tmp/{}-{uid}", *APP_NAME.read().unwrap()).into()
+                }
+            };
+            #[cfg(not(any(target_os = "android", target_os = "linux", target_os = "macos")))]
             let mut path: PathBuf = format!("/tmp/{}", *APP_NAME.read().unwrap()).into();
-            fs::create_dir(&path).ok();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o0777)).ok();
+            #[cfg(any(target_os = "android"))]
+            fs::create_dir_all(&path).ok();
+            #[cfg(any(target_os = "android"))]
+            let path_mode = if is_service_ipc_postfix(postfix) { 0o0711 } else { 0o0700 };
+            #[cfg(any(target_os = "android"))]
+            fs::set_permissions(&path, fs::Permissions::from_mode(path_mode)).ok();
             path.push(format!("ipc{postfix}"));
             path.to_str().unwrap_or("").to_owned()
         }
@@ -3236,5 +3255,14 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_service_ipc_postfix_compatibility() {
+        assert!(is_service_ipc_postfix("_service"));
+        assert!(is_service_ipc_postfix("_service_abcdef"));
+        assert!(!is_service_ipc_postfix(""));
+        assert!(!is_service_ipc_postfix("_services"));
     }
 }
