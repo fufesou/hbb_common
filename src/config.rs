@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::Result;
 use bytes::Bytes;
-use rand::Rng;
+use rand::{rngs::OsRng, Rng, RngCore};
 use regex::Regex;
 use serde as de;
 use serde_derive::{Deserialize, Serialize};
@@ -45,6 +45,13 @@ pub const ENCRYPT_MAX_LEN: usize = 128; // used for password, pin, etc, not for 
 const PERMANENT_PASSWORD_HASH_PREFIX: &str = "01";
 const PERMANENT_PASSWORD_H1_LEN: usize = 32;
 const DEFAULT_SALT_LEN: usize = 6;
+pub const TRUSTED_DEVICE_V2_TOKEN_LEN: usize = 32;
+pub const TRUSTED_DEVICE_V2_HASH_LEN: usize = 32;
+pub const MILLIS_PER_DAY: i64 = 24 * 60 * 60 * 1000;
+pub const TRUSTED_DEVICE_V2_LIFETIME_DAYS: i64 = 30;
+pub const TRUSTED_DEVICE_V2_LIFETIME_MILLIS: i64 = TRUSTED_DEVICE_V2_LIFETIME_DAYS * MILLIS_PER_DAY;
+pub const TRUSTED_DEVICE_V2_MAX_RECORDS: usize = 32;
+pub const TRUSTED_DEVICES_V2_MAX_SERIALIZED_LEN: usize = 1024 * 1024;
 
 fn is_permanent_password_hashed_storage(v: &str) -> bool {
     decode_permanent_password_h1_from_storage(v).is_some()
@@ -105,6 +112,7 @@ lazy_static::lazy_static! {
     static ref LOCAL_CONFIG: RwLock<LocalConfig> = RwLock::new(LocalConfig::load());
     static ref STATUS: RwLock<Status> = RwLock::new(Status::load());
     static ref TRUSTED_DEVICES: RwLock<(Vec<TrustedDevice>, bool)> = Default::default();
+    static ref TRUSTED_DEVICES_V2: RwLock<(Vec<TrustedDeviceV2>, bool)> = Default::default();
     static ref ONLINE: Mutex<HashMap<String, i64>> = Default::default();
     pub static ref PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new("".to_owned());
     pub static ref EXE_RENDEZVOUS_SERVER: RwLock<String> = Default::default();
@@ -267,6 +275,8 @@ pub struct Config2 {
     unlock_pin: String,
     #[serde(default, deserialize_with = "deserialize_string")]
     trusted_devices: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    trusted_devices_v2: String,
 
     #[serde(default)]
     socks: Option<Socks5Server>,
@@ -286,6 +296,12 @@ pub struct Resolution {
 pub struct PeerConfig {
     #[serde(default, deserialize_with = "deserialize_vec_u8")]
     pub password: Vec<u8>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_vec_u8",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub trusted_device_v2_token: Vec<u8>,
     #[serde(default, deserialize_with = "deserialize_size")]
     pub size: Size,
     #[serde(default, deserialize_with = "deserialize_size")]
@@ -413,6 +429,7 @@ impl Default for PeerConfig {
     fn default() -> Self {
         Self {
             password: Default::default(),
+            trusted_device_v2_token: Default::default(),
             size: Default::default(),
             size_ft: Default::default(),
             size_pf: Default::default(),
@@ -1237,19 +1254,24 @@ impl Config {
             }
         }
 
-        let mut config = CONFIG.write().unwrap();
+        {
+            let mut config = CONFIG.write().unwrap();
 
-        let stored = if password.is_empty() {
-            String::new()
-        } else {
-            Self::compute_permanent_password_storage_for_update(&mut config, password)
-        };
-        if stored == config.password {
-            return;
+            let stored = if password.is_empty() {
+                String::new()
+            } else {
+                Self::compute_permanent_password_storage_for_update(&mut config, password)
+            };
+            if stored == config.password {
+                return;
+            }
+            config.password = stored;
+            config.store();
         }
-        config.password = stored;
-        config.store();
         Self::clear_trusted_devices();
+        if let Err(err) = Self::clear_trusted_devices_v2() {
+            log::error!("Failed to clear trusted device V2 records: {}", err);
+        }
     }
 
     fn compute_permanent_password_storage_for_update(
@@ -1280,15 +1302,18 @@ impl Config {
         storage: &str,
         salt: &str,
     ) -> crate::ResultType<bool> {
-        let mut config = CONFIG.write().unwrap();
-        if config.password == storage && config.salt == salt {
-            return Ok(false);
-        }
+        {
+            let mut config = CONFIG.write().unwrap();
+            if config.password == storage && config.salt == salt {
+                return Ok(false);
+            }
 
-        config.password = storage.to_owned();
-        config.salt = salt.to_owned();
-        config.store();
+            config.password = storage.to_owned();
+            config.salt = salt.to_owned();
+            config.store();
+        }
         Self::clear_trusted_devices();
+        Self::clear_trusted_devices_v2()?;
         Ok(true)
     }
 
@@ -1547,17 +1572,125 @@ impl Config {
         Self::set_trusted_devices(Default::default());
     }
 
+    pub fn get_trusted_devices_v2() -> Vec<TrustedDeviceV2> {
+        let cached = TRUSTED_DEVICES_V2.read().unwrap().clone();
+        if cached.1 {
+            return cached.0;
+        }
+
+        let stored = CONFIG2.read().unwrap().trusted_devices_v2.clone();
+        let (stored, succ, store) = decrypt_str_or_original(&stored, PASSWORD_ENC_VERSION);
+        if !succ {
+            if !stored.is_empty() {
+                log::warn!("Trusted device V2 storage decrypt failed");
+            }
+            return Default::default();
+        }
+
+        let parsed = serde_json::from_str::<Vec<TrustedDeviceV2>>(&stored);
+        let devices = match parsed {
+            Ok(devices) => devices,
+            Err(err) => {
+                if !stored.is_empty() {
+                    log::warn!("Trusted device V2 storage parse failed: {}", err);
+                }
+                return Default::default();
+            }
+        };
+
+        let normalized = Self::normalize_trusted_devices_v2(devices);
+        if store
+            || normalized.len()
+                != serde_json::from_str::<Vec<TrustedDeviceV2>>(&stored)
+                    .map(|devices| devices.len())
+                    .unwrap_or_default()
+        {
+            if let Err(err) = Self::set_trusted_devices_v2(normalized.clone()) {
+                log::error!("Failed to prune trusted device V2 storage: {}", err);
+            }
+        }
+        *TRUSTED_DEVICES_V2.write().unwrap() = (normalized.clone(), true);
+        normalized
+    }
+
+    fn normalize_trusted_devices_v2(
+        mut trusted_devices: Vec<TrustedDeviceV2>,
+    ) -> Vec<TrustedDeviceV2> {
+        let now = crate::get_time();
+        trusted_devices.retain(|d| trusted_device_v2_is_unexpired(d.created_at, now));
+        trusted_devices.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        let mut seen = HashSet::<Vec<u8>>::new();
+        trusted_devices.retain(|d| seen.insert(d.token_hash.to_vec()));
+        trusted_devices.truncate(TRUSTED_DEVICE_V2_MAX_RECORDS);
+        trusted_devices
+    }
+
+    fn set_trusted_devices_v2(trusted_devices: Vec<TrustedDeviceV2>) -> crate::ResultType<()> {
+        let trusted_devices = Self::normalize_trusted_devices_v2(trusted_devices);
+        let devices = serde_json::to_string(&trusted_devices)?;
+        if devices.bytes().len() > TRUSTED_DEVICES_V2_MAX_SERIALIZED_LEN {
+            return Err(anyhow::anyhow!(
+                "trusted device V2 storage too large: {}",
+                devices.bytes().len()
+            ));
+        }
+
+        let devices = encrypt_str_or_original(
+            &devices,
+            PASSWORD_ENC_VERSION,
+            TRUSTED_DEVICES_V2_MAX_SERIALIZED_LEN,
+        );
+        let mut config = CONFIG2.write().unwrap();
+        config.trusted_devices_v2 = devices;
+        config.store();
+        *TRUSTED_DEVICES_V2.write().unwrap() = (trusted_devices, true);
+        Ok(())
+    }
+
+    pub fn add_trusted_device_v2(device: TrustedDeviceV2) -> crate::ResultType<()> {
+        let mut devices = Self::get_trusted_devices_v2();
+        devices.retain(|d| d.token_hash != device.token_hash);
+        devices.push(device);
+        Self::set_trusted_devices_v2(devices)
+    }
+
+    pub fn clear_trusted_devices_v2() -> crate::ResultType<()> {
+        Self::set_trusted_devices_v2(Default::default())
+    }
+
+    pub fn generate_trusted_device_token() -> crate::ResultType<Bytes> {
+        let mut token = vec![0u8; TRUSTED_DEVICE_V2_TOKEN_LEN];
+        OsRng
+            .try_fill_bytes(&mut token)
+            .map_err(|err| anyhow::anyhow!("trusted device token generation failed: {}", err))?;
+        Ok(Bytes::from(token))
+    }
+
+    pub fn hash_trusted_device_token(token: &[u8]) -> Bytes {
+        let mut hasher = Sha256::new();
+        hasher.update(token);
+        Bytes::copy_from_slice(&hasher.finalize()[..TRUSTED_DEVICE_V2_HASH_LEN])
+    }
+
+    pub fn verify_trusted_device_token(token: &[u8], stored_hash: &[u8]) -> bool {
+        if stored_hash.len() != TRUSTED_DEVICE_V2_HASH_LEN {
+            return false;
+        }
+        let hash = Self::hash_trusted_device_token(token);
+        sodiumoxide::utils::memcmp(&hash, stored_hash)
+    }
+
     pub fn get() -> Config {
         return CONFIG.read().unwrap().clone();
     }
 
-    // TODO: `Config::set()` does not invalidate trusted devices when permanent password/salt changes.
-    // This matches historical behavior, but may need revisiting in a separate PR.
     pub fn set(cfg: Config) -> bool {
         let mut lock = CONFIG.write().unwrap();
         if *lock == cfg {
             return false;
         }
+        let trusted_devices_v2_invalidated = lock.password != cfg.password || lock.salt != cfg.salt;
         *lock = cfg;
         lock.store();
         // Drop CONFIG lock before acquiring KEY_PAIR lock to avoid potential deadlock.
@@ -1566,6 +1699,11 @@ impl Config {
         drop(lock);
         #[cfg(target_os = "macos")]
         Self::invalidate_key_pair_cache_if_changed(&new_key_pair);
+        if trusted_devices_v2_invalidated {
+            if let Err(err) = Self::clear_trusted_devices_v2() {
+                log::error!("Failed to clear trusted device V2 records: {}", err);
+            }
+        }
         true
     }
 
@@ -1656,6 +1794,34 @@ impl PeerConfig {
 
     pub fn remove(id: &str) {
         fs::remove_file(Self::path(id)).ok();
+    }
+
+    pub fn get_trusted_device_v2_token(&self) -> crate::ResultType<Option<Bytes>> {
+        if self.trusted_device_v2_token.is_empty() {
+            return Ok(None);
+        }
+        if self.trusted_device_v2_token.len() != TRUSTED_DEVICE_V2_TOKEN_LEN {
+            return Err(anyhow::anyhow!(
+                "malformed trusted device V2 token length: {}",
+                self.trusted_device_v2_token.len()
+            ));
+        }
+        Ok(Some(Bytes::copy_from_slice(&self.trusted_device_v2_token)))
+    }
+
+    pub fn set_trusted_device_v2_token(&mut self, token: &[u8]) -> crate::ResultType<()> {
+        if token.len() != TRUSTED_DEVICE_V2_TOKEN_LEN {
+            return Err(anyhow::anyhow!(
+                "invalid trusted device V2 token length: {}",
+                token.len()
+            ));
+        }
+        self.trusted_device_v2_token = token.to_vec();
+        Ok(())
+    }
+
+    pub fn clear_trusted_device_v2_token(&mut self) {
+        self.trusted_device_v2_token.clear();
     }
 
     fn path(id: &str) -> PathBuf {
@@ -2620,6 +2786,19 @@ impl TrustedDevice {
     }
 }
 
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct TrustedDeviceV2 {
+    pub token_hash: Bytes,
+    pub created_at: i64,
+}
+
+fn trusted_device_v2_is_unexpired(created_at: i64, now: i64) -> bool {
+    match created_at.checked_add(TRUSTED_DEVICE_V2_LIFETIME_MILLIS) {
+        Some(expires_at) => now <= expires_at,
+        None => false,
+    }
+}
+
 deserialize_default!(deserialize_string, String);
 deserialize_default!(deserialize_bool, bool);
 deserialize_default!(deserialize_i32, i32);
@@ -2805,7 +2984,8 @@ pub mod keys {
     pub const OPTION_ENABLE_RECORD_SESSION: &str = "enable-record-session";
     pub const OPTION_ENABLE_BLOCK_INPUT: &str = "enable-block-input";
     pub const OPTION_ENABLE_PRIVACY_MODE: &str = "enable-privacy-mode";
-    pub const OPTION_ENABLE_PERM_CHANGE_IN_ACCEPT_WINDOW: &str = "enable-perm-change-in-accept-window";
+    pub const OPTION_ENABLE_PERM_CHANGE_IN_ACCEPT_WINDOW: &str =
+        "enable-perm-change-in-accept-window";
     pub const OPTION_ALLOW_REMOTE_CONFIG_MODIFICATION: &str = "allow-remote-config-modification";
     pub const OPTION_ALLOW_NUMERNIC_ONE_TIME_PASSWORD: &str = "allow-numeric-one-time-password";
     pub const OPTION_ENABLE_LAN_DISCOVERY: &str = "enable-lan-discovery";
@@ -3168,6 +3348,219 @@ impl Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    lazy_static::lazy_static! {
+        static ref TRUSTED_DEVICE_V2_TEST_LOCK: Mutex<()> = Mutex::new(());
+    }
+
+    struct TrustedDeviceV2TestGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        config2: Config2,
+        trusted_devices_v2: (Vec<TrustedDeviceV2>, bool),
+    }
+
+    impl TrustedDeviceV2TestGuard {
+        fn new() -> Self {
+            let lock = TRUSTED_DEVICE_V2_TEST_LOCK.lock().unwrap();
+            let guard = Self {
+                _lock: lock,
+                config2: CONFIG2.read().unwrap().clone(),
+                trusted_devices_v2: TRUSTED_DEVICES_V2.read().unwrap().clone(),
+            };
+            CONFIG2.write().unwrap().trusted_devices_v2.clear();
+            *TRUSTED_DEVICES_V2.write().unwrap() = Default::default();
+            guard
+        }
+    }
+
+    impl Drop for TrustedDeviceV2TestGuard {
+        fn drop(&mut self) {
+            *CONFIG2.write().unwrap() = self.config2.clone();
+            *TRUSTED_DEVICES_V2.write().unwrap() = self.trusted_devices_v2.clone();
+        }
+    }
+
+    fn trusted_device_v2_record(byte: u8, created_at: i64) -> TrustedDeviceV2 {
+        TrustedDeviceV2 {
+            token_hash: Bytes::from(vec![byte; TRUSTED_DEVICE_V2_HASH_LEN]),
+            created_at,
+        }
+    }
+
+    #[test]
+    fn trusted_device_v2_add_get_clear_roundtrip() {
+        let _guard = TrustedDeviceV2TestGuard::new();
+        let record = trusted_device_v2_record(7, crate::get_time());
+
+        Config::add_trusted_device_v2(record.clone()).unwrap();
+
+        assert_eq!(Config::get_trusted_devices_v2(), vec![record]);
+        Config::clear_trusted_devices_v2().unwrap();
+        assert!(Config::get_trusted_devices_v2().is_empty());
+    }
+
+    #[test]
+    fn trusted_device_v2_malformed_storage_fails_closed() {
+        let _guard = TrustedDeviceV2TestGuard::new();
+        CONFIG2.write().unwrap().trusted_devices_v2 = "not-json".to_owned();
+        *TRUSTED_DEVICES_V2.write().unwrap() = Default::default();
+
+        assert!(Config::get_trusted_devices_v2().is_empty());
+    }
+
+    #[test]
+    fn trusted_device_v2_does_not_migrate_legacy_records() {
+        let _guard = TrustedDeviceV2TestGuard::new();
+        let legacy = TrustedDevice {
+            hwid: Bytes::from_static(b"legacy-hwid"),
+            time: crate::get_time(),
+            id: "peer".to_owned(),
+            name: "name".to_owned(),
+            platform: "linux".to_owned(),
+        };
+        Config::add_trusted_device(legacy);
+
+        assert!(Config::get_trusted_devices_v2().is_empty());
+    }
+
+    #[test]
+    fn trusted_device_v2_record_contains_only_hash_and_created_at() {
+        let record = trusted_device_v2_record(1, crate::get_time());
+        let value = serde_json::to_value(record).unwrap();
+        let fields = value.as_object().unwrap();
+
+        assert_eq!(fields.len(), 2);
+        assert!(fields.contains_key("token_hash"));
+        assert!(fields.contains_key("created_at"));
+    }
+
+    #[test]
+    fn trusted_device_v2_prunes_expired_and_keeps_newest_records() {
+        let _guard = TrustedDeviceV2TestGuard::new();
+        let now = crate::get_time();
+        let expired = now - TRUSTED_DEVICE_V2_LIFETIME_MILLIS - 1;
+
+        Config::add_trusted_device_v2(trusted_device_v2_record(250, expired)).unwrap();
+        for i in 0..(TRUSTED_DEVICE_V2_MAX_RECORDS + 3) {
+            Config::add_trusted_device_v2(trusted_device_v2_record(i as u8, now + i as i64))
+                .unwrap();
+        }
+
+        let devices = Config::get_trusted_devices_v2();
+        assert_eq!(devices.len(), TRUSTED_DEVICE_V2_MAX_RECORDS);
+        assert!(!devices
+            .iter()
+            .any(|d| d.token_hash == Bytes::from(vec![250; 32])));
+        assert!(!devices
+            .iter()
+            .any(|d| d.token_hash == Bytes::from(vec![0; 32])));
+        assert!(devices
+            .iter()
+            .any(|d| d.token_hash == Bytes::from(vec![34; 32])));
+    }
+
+    #[test]
+    fn trusted_device_v2_storage_rejects_oversized_json() {
+        let _guard = TrustedDeviceV2TestGuard::new();
+        let original = CONFIG2.read().unwrap().trusted_devices_v2.clone();
+        let huge = TrustedDeviceV2 {
+            token_hash: Bytes::from(vec![1; TRUSTED_DEVICES_V2_MAX_SERIALIZED_LEN]),
+            created_at: crate::get_time(),
+        };
+
+        assert!(Config::set_trusted_devices_v2(vec![huge]).is_err());
+        assert_eq!(CONFIG2.read().unwrap().trusted_devices_v2, original);
+    }
+
+    #[test]
+    fn trusted_device_v2_token_crypto_and_expiry() {
+        let token = Config::generate_trusted_device_token().unwrap();
+        assert_eq!(token.len(), TRUSTED_DEVICE_V2_TOKEN_LEN);
+
+        let hash = Config::hash_trusted_device_token(&token);
+        assert!(Config::verify_trusted_device_token(&token, &hash));
+        assert!(!Config::verify_trusted_device_token(b"wrong-token", &hash));
+        assert!(!Config::verify_trusted_device_token(&token, b"short"));
+
+        let now = crate::get_time();
+        assert!(trusted_device_v2_is_unexpired(now, now));
+        assert!(trusted_device_v2_is_unexpired(
+            now - TRUSTED_DEVICE_V2_LIFETIME_MILLIS,
+            now
+        ));
+        assert!(!trusted_device_v2_is_unexpired(
+            now - TRUSTED_DEVICE_V2_LIFETIME_MILLIS - 1,
+            now
+        ));
+    }
+
+    #[test]
+    fn trusted_device_v2_password_change_clears_records() {
+        let _guard = TrustedDeviceV2TestGuard::new();
+        Config::add_trusted_device_v2(trusted_device_v2_record(9, crate::get_time())).unwrap();
+
+        let mut config = Config::get();
+        config.password = "trusted-device-v2-test-password-storage".to_owned();
+        config.salt = "trusted-device-v2-test-salt".to_owned();
+        Config::set(config);
+
+        assert!(Config::get_trusted_devices_v2().is_empty());
+    }
+
+    #[test]
+    fn trusted_device_v2_peer_config_token_roundtrip_and_clear() {
+        let peer_id = "trusted-device-v2-peer-a";
+        let mut config = PeerConfig::default();
+        let token = vec![3u8; TRUSTED_DEVICE_V2_TOKEN_LEN];
+
+        config.set_trusted_device_v2_token(&token).unwrap();
+        config.store(peer_id);
+
+        let loaded = PeerConfig::load(peer_id)
+            .get_trusted_device_v2_token()
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded, Bytes::from(token));
+
+        let mut loaded = PeerConfig::load(peer_id);
+        loaded.clear_trusted_device_v2_token();
+        loaded.store(peer_id);
+        assert!(PeerConfig::load(peer_id)
+            .get_trusted_device_v2_token()
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn trusted_device_v2_peer_config_rejects_malformed_token() {
+        let mut config = PeerConfig::default();
+        config.trusted_device_v2_token = vec![1u8; TRUSTED_DEVICE_V2_TOKEN_LEN - 1];
+
+        assert!(config.get_trusted_device_v2_token().is_err());
+        assert!(config
+            .set_trusted_device_v2_token(&[1u8; TRUSTED_DEVICE_V2_TOKEN_LEN - 1])
+            .is_err());
+    }
+
+    #[test]
+    fn trusted_device_v2_peer_config_is_scoped_by_peer_id() {
+        let peer_a = "trusted-device-v2-scope-a";
+        let peer_b = "trusted-device-v2-scope-b";
+        let token = vec![8u8; TRUSTED_DEVICE_V2_TOKEN_LEN];
+        let mut config_a = PeerConfig::default();
+
+        config_a.set_trusted_device_v2_token(&token).unwrap();
+        config_a.store(peer_a);
+
+        assert!(PeerConfig::load(peer_a)
+            .get_trusted_device_v2_token()
+            .unwrap()
+            .is_some());
+        assert!(PeerConfig::load(peer_b)
+            .get_trusted_device_v2_token()
+            .unwrap()
+            .is_none());
+    }
 
     #[test]
     fn test_serialize() {
