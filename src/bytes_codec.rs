@@ -2,6 +2,9 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::io;
 use tokio_util::codec::{Decoder, Encoder};
 
+// Bound speculative allocation from untrusted frame headers.
+const MAX_PREALLOCATED_PAYLOAD_LEN: usize = 256 * 1024;
+
 #[derive(Debug, Clone, Copy)]
 pub struct BytesCodec {
     state: DecodeState,
@@ -61,7 +64,10 @@ impl BytesCodec {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Too big packet"));
         }
         src.advance(head_len);
-        src.reserve(n);
+        src.reserve(
+            n.saturating_sub(src.len())
+                .min(MAX_PREALLOCATED_PAYLOAD_LEN),
+        );
         Ok(Some(n))
     }
 
@@ -137,6 +143,24 @@ impl Encoder<Bytes> for BytesCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_does_not_reserve_declared_payload_before_bytes_arrive() {
+        const DECLARED_LEN: usize = 2 * 1024 * 1024;
+
+        let mut codec = BytesCodec::new();
+        let mut buf = BytesMut::new();
+        buf.put_u32_le(((DECLARED_LEN << 2) as u32) | 0x3);
+
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+        assert!(
+            buf.capacity() < DECLARED_LEN / 2,
+            "capacity {} grew toward declared frame length {}",
+            buf.capacity(),
+            DECLARED_LEN
+        );
+    }
+
     #[test]
     fn test_codec1() {
         let mut codec = BytesCodec::new();
