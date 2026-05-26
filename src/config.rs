@@ -36,8 +36,8 @@ use crate::{
     compress::{compress, decompress},
     log,
     password_security::{
-        decrypt_str_or_original, decrypt_vec_or_original, encrypt_str_or_original,
-        encrypt_vec_or_original, symmetric_crypt,
+        decrypt_str_or_original, decrypt_vec_or_original, encrypt_id_str_or_original_legacy_nonce,
+        encrypt_str_or_original, encrypt_vec_or_original, symmetric_crypt,
     },
 };
 
@@ -710,7 +710,11 @@ impl Config {
             config.password =
                 encrypt_str_or_original(&config.password, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
         }
-        config.enc_id = encrypt_str_or_original(&config.id, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
+        config.enc_id = encrypt_id_str_or_original_legacy_nonce(
+            &config.id,
+            PASSWORD_ENC_VERSION,
+            ENCRYPT_MAX_LEN,
+        );
         config.id = "".to_owned();
         Config::store_(&config, "");
     }
