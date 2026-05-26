@@ -30,6 +30,7 @@ use permanent_password::{
     decode_permanent_password_h1_from_hashed_storage, decrypt_permanent_password_str_or_original,
     encode_permanent_password_encrypted_storage_from_h1, password_is_empty_or_not_hashed,
     preset_permanent_password_storage_matches_plain, DEFAULT_SALT_LEN, PASSWORD_ENC_VERSION,
+    PERMANENT_PASSWORD_ENC_VERSION,
 };
 
 use crate::{
@@ -685,26 +686,24 @@ impl Config {
         }
     }
 
-    fn prepare_config_for_store(config: &mut Config) {
+    fn prepare_config_for_store(config: &mut Config) -> bool {
         match Self::validate_or_decrypt_permanent_password_storage(config) {
-            Ok(_) => {}
+            Ok(_) => true,
             Err(err) => {
-                // This path is for unrecoverable permanent-password storage, such as
-                // hashed storage without its salt. Keep unrelated config writes working,
-                // but handle future transient migration errors separately.
                 log::error!(
-                    "Clearing invalid permanent password storage before storing config: {err}"
+                    "Keeping invalid permanent password storage unchanged before storing config: {err}"
                 );
-                config.password.clear();
-                config.salt.clear();
+                false
             }
         }
     }
 
     fn store(&self) {
         let mut config = self.clone();
-        Self::prepare_config_for_store(&mut config);
-        if !config.password.is_empty()
+        let password_storage_is_valid = Self::prepare_config_for_store(&mut config);
+        if password_storage_is_valid
+            && !config.password.is_empty()
+            && !config.password.starts_with(PERMANENT_PASSWORD_ENC_VERSION)
             && decode_permanent_password_h1_from_storage(&config.password).is_none()
         {
             config.password =
@@ -3466,6 +3465,24 @@ mod tests {
             assert_eq!(updated.password, invalid_storage);
             assert!(updated.salt.is_empty());
             assert_eq!(updated.id, "123456789");
+        });
+    }
+
+    #[test]
+    fn test_store_preserves_invalid_permanent_password_storage() {
+        let mut cfg = Config::default();
+        let invalid_payload =
+            crate::password_security::symmetric_crypt(b"not-a-hash", true).unwrap();
+        let invalid_storage = PERMANENT_PASSWORD_ENC_VERSION.to_owned()
+            + &base64::encode(invalid_payload, base64::Variant::Original);
+        cfg.password = invalid_storage.clone();
+        cfg.id = "123456789".to_owned();
+
+        with_config_and_hard_settings(Config::default(), HashMap::new(), || {
+            assert!(Config::set(cfg));
+
+            let stored = Config::load_::<Config>("");
+            assert_eq!(stored.password, invalid_storage);
         });
     }
 
