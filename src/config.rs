@@ -38,13 +38,14 @@ use crate::{
     log,
     password_security::{
         decrypt_str_or_original, decrypt_vec_or_original, encrypt_str_or_original,
-        encrypt_vec_or_original, symmetric_crypt,
+        encrypt_str_or_original_legacy_nonce, encrypt_vec_or_original, symmetric_crypt, CRYPTO_LOG_PREFIX,
     },
 };
 
 pub const RENDEZVOUS_TIMEOUT: u64 = 12_000;
 pub const CONNECT_TIMEOUT: u64 = 18_000;
 pub const READ_TIMEOUT: u64 = 18_000;
+const CRYPTO_VALUE_LOG_PREFIX: &str = "========================||||";
 // https://github.com/quic-go/quic-go/issues/525#issuecomment-294531351
 // https://datatracker.ietf.org/doc/html/draft-hamilton-early-deployment-quic-00#section-6.10
 // 15 seconds is recommended by quic, though oneSIP recommend 25 seconds,
@@ -495,12 +496,24 @@ impl Config2 {
         let mut config = Config::load_::<Config2>("2");
         let mut store = false;
         if let Some(mut socks) = config.socks {
+            log::info!("{CRYPTO_LOG_PREFIX} Config2::load decrypt socks.password");
+            let encrypted_len = socks.password.len();
             let (password, _, store2) =
                 decrypt_str_or_original(&socks.password, PASSWORD_ENC_VERSION);
+            if store2 || password != socks.password {
+                log::info!(
+                    "{CRYPTO_VALUE_LOG_PREFIX} Config2::load socks.password decrypted value={password}"
+                );
+            } else {
+                log::info!(
+                    "{CRYPTO_VALUE_LOG_PREFIX} Config2::load socks.password decrypt FAILED, encrypted_len={encrypted_len}"
+                );
+            }
             socks.password = password;
             config.socks = Some(socks);
             store |= store2;
         }
+        log::info!("{CRYPTO_LOG_PREFIX} Config2::load decrypt unlock_pin");
         let (unlock_pin, _, store2) =
             decrypt_str_or_original(&config.unlock_pin, PASSWORD_ENC_VERSION);
         config.unlock_pin = unlock_pin;
@@ -518,10 +531,12 @@ impl Config2 {
     fn store(&self) {
         let mut config = self.clone();
         if let Some(mut socks) = config.socks {
+            log::info!("{CRYPTO_LOG_PREFIX} Config2::store encrypt socks.password");
             socks.password =
                 encrypt_str_or_original(&socks.password, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
             config.socks = Some(socks);
         }
+        log::info!("{CRYPTO_LOG_PREFIX} Config2::store encrypt unlock_pin");
         config.unlock_pin =
             encrypt_str_or_original(&config.unlock_pin, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
         Config::store_(&config, "2");
@@ -603,11 +618,20 @@ impl Config {
             log::error!("Failed to validate or decrypt permanent password storage: {err}");
         }
         let mut id_valid = false;
+        log::info!("{CRYPTO_LOG_PREFIX} Config::load decrypt enc_id");
+        let encrypted_len = config.enc_id.len();
         let (id, encrypted, store2) = decrypt_str_or_original(&config.enc_id, PASSWORD_ENC_VERSION);
         if encrypted {
+            log::info!("{CRYPTO_VALUE_LOG_PREFIX} Config::load enc_id decrypted value={id}，to store: {store2}");
             config.id = id;
             id_valid = true;
             store |= store2;
+        } else if !config.enc_id.is_empty() {
+            log::info!(
+                "{CRYPTO_VALUE_LOG_PREFIX} Config::load enc_id decrypt FAILED, encrypted_len={encrypted_len}"
+            );
+        } else if !config.id.is_empty() && config.enc_id.is_empty() {
+            log::info!("{CRYPTO_LOG_PREFIX} Config::load probe plain config.id for legacy encryption");
         } else if
         // Comment out for forward compatible
         // crate::get_modified_time(&Self::file_(""))
@@ -619,6 +643,7 @@ impl Config {
             && config.enc_id.is_empty()
             && !decrypt_str_or_original(&config.id, PASSWORD_ENC_VERSION).1
         {
+            log::info!("{CRYPTO_LOG_PREFIX} Config::load probe plain config.id for legacy encryption success, id={}", config.id);
             id_valid = true;
             store = true;
         }
@@ -626,6 +651,7 @@ impl Config {
             log::warn!("ID is invalid, generating new one");
             for _ in 0..3 {
                 if let Some(id) = Config::gen_id() {
+                    log::info!("{CRYPTO_LOG_PREFIX} Config::load generated new id={id}");
                     config.id = id;
                     store = true;
                     break;
@@ -635,6 +661,7 @@ impl Config {
             }
         }
         if store {
+            log::info!("{CRYPTO_LOG_PREFIX} load store");
             config.store();
         }
         config
@@ -646,18 +673,31 @@ impl Config {
         }
 
         if config.password.starts_with(PASSWORD_ENC_VERSION) {
+            log::info!(
+                "{CRYPTO_LOG_PREFIX} Config::validate_or_decrypt_permanent_password_storage decrypt legacy config.password"
+            );
+            let encrypted_len = config.password.len();
             let (plain, decrypted, should_store) =
                 decrypt_str_or_original(&config.password, PASSWORD_ENC_VERSION);
             if decrypted {
+                log::info!(
+                    "{CRYPTO_VALUE_LOG_PREFIX} Config::validate_or_decrypt_permanent_password_storage config.password decrypted value={plain}"
+                );
                 config.password = plain;
                 return Ok(());
             }
+            log::info!(
+                "{CRYPTO_VALUE_LOG_PREFIX} Config::validate_or_decrypt_permanent_password_storage config.password decrypt FAILED, encrypted_len={encrypted_len}"
+            );
             if !should_store {
                 return Err(anyhow!("Invalid permanent password encrypted hash storage"));
             }
             return Ok(());
         }
 
+        log::info!(
+            "{CRYPTO_LOG_PREFIX} Config::validate_or_decrypt_permanent_password_storage decrypt current permanent password storage"
+        );
         let (decrypted_storage, decrypted, _) =
             decrypt_permanent_password_str_or_original(&config.password);
         if decrypted {
@@ -706,10 +746,13 @@ impl Config {
             && !config.password.starts_with(PERMANENT_PASSWORD_ENC_VERSION)
             && decode_permanent_password_h1_from_storage(&config.password).is_none()
         {
+            log::info!("{CRYPTO_LOG_PREFIX} Config::store encrypt legacy config.password");
             config.password =
                 encrypt_str_or_original(&config.password, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
         }
-        config.enc_id = encrypt_str_or_original(&config.id, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
+        log::info!("{CRYPTO_LOG_PREFIX} Config::store encrypt id into enc_id");
+        config.enc_id =
+            encrypt_str_or_original_legacy_nonce(&config.id, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
         config.id = "".to_owned();
         Config::store_(&config, "");
     }
@@ -970,6 +1013,7 @@ impl Config {
             return;
         }
         config.id = id.into();
+        log::info!("{CRYPTO_LOG_PREFIX} set id");
         config.store();
     }
 
@@ -1079,6 +1123,7 @@ impl Config {
         if !v {
             config.keys_confirmed = Default::default();
         }
+        log::info!("{CRYPTO_LOG_PREFIX} set key confirmed");
         config.store();
     }
 
@@ -1088,10 +1133,15 @@ impl Config {
 
     pub fn set_host_key_confirmed(host: &str, v: bool) {
         if Self::get_host_key_confirmed(host) == v {
+            log::info!("{CRYPTO_LOG_PREFIX} host key confirmed already set to {v}");
             return;
         }
+        log::info!(
+            "{CRYPTO_LOG_PREFIX} set host key confirmed for host {host} to {v}"
+        );
         let mut config = CONFIG.write().unwrap();
         config.keys_confirmed.insert(host.to_owned(), v);
+        log::info!("{CRYPTO_LOG_PREFIX} set host key confirmed");
         config.store();
     }
 
@@ -1111,6 +1161,7 @@ impl Config {
             std::thread::spawn(|| {
                 let mut config = CONFIG.write().unwrap();
                 config.key_pair = key_pair;
+                log::info!("{CRYPTO_LOG_PREFIX} set key pair");
                 config.store();
             });
         }
@@ -1297,6 +1348,7 @@ impl Config {
         }
         config.password = stored;
         config.store();
+        log::info!("{CRYPTO_LOG_PREFIX} set_permanent_password");
         Self::clear_trusted_devices();
         true
     }
@@ -1332,6 +1384,7 @@ impl Config {
             return Ok(false);
         }
 
+        log::info!("{CRYPTO_LOG_PREFIX} set_permanent_password_storage_for_sync");
         config.store();
         Self::clear_trusted_devices();
         Ok(true)
@@ -1438,6 +1491,7 @@ impl Config {
             }
         }
         config.salt = salt.into();
+        log::info!("{CRYPTO_LOG_PREFIX} set salt");
         config.store();
     }
 
@@ -1581,6 +1635,7 @@ impl Config {
             return devices;
         }
         let devices = CONFIG2.read().unwrap().trusted_devices.clone();
+        log::info!("{CRYPTO_LOG_PREFIX} Config::get_trusted_devices decrypt trusted_devices");
         let (devices, succ, store) = decrypt_str_or_original(&devices, PASSWORD_ENC_VERSION);
         if succ {
             let mut devices: Vec<TrustedDevice> =
@@ -1605,6 +1660,7 @@ impl Config {
             log::error!("Trusted devices too large: {}", devices.bytes().len());
             return;
         }
+        log::info!("{CRYPTO_LOG_PREFIX} Config::set_trusted_devices encrypt trusted_devices");
         let devices = encrypt_str_or_original(&devices, PASSWORD_ENC_VERSION, max_len);
         let mut config = CONFIG2.write().unwrap();
         config.trusted_devices = devices;
@@ -1641,6 +1697,7 @@ impl Config {
             return false;
         }
         *lock = cfg;
+        log::info!("{CRYPTO_LOG_PREFIX} set whole config");
         lock.store();
         // Drop CONFIG lock before acquiring KEY_PAIR lock to avoid potential deadlock.
         #[cfg(target_os = "macos")]
@@ -1687,12 +1744,14 @@ impl PeerConfig {
             Ok(config) => {
                 let mut config: PeerConfig = config;
                 let mut store = false;
+                log::info!("{CRYPTO_LOG_PREFIX} PeerConfig::load decrypt password");
                 let (password, _, store2) =
                     decrypt_vec_or_original(&config.password, PASSWORD_ENC_VERSION);
                 config.password = password;
                 store = store || store2;
                 for opt in ["rdp_password", "os-username", "os-password"] {
                     if let Some(v) = config.options.get_mut(opt) {
+                        log::info!("{CRYPTO_LOG_PREFIX} PeerConfig::load decrypt option={opt}");
                         let (encrypted, _, store2) =
                             decrypt_str_or_original(v, PASSWORD_ENC_VERSION);
                         *v = encrypted;
@@ -1723,10 +1782,12 @@ impl PeerConfig {
 
     fn store_(&self, id: &str) {
         let mut config = self.clone();
+        log::info!("{CRYPTO_LOG_PREFIX} PeerConfig::store encrypt password");
         config.password =
             encrypt_vec_or_original(&config.password, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
         for opt in ["rdp_password", "os-username", "os-password"] {
             if let Some(v) = config.options.get_mut(opt) {
+                log::info!("{CRYPTO_LOG_PREFIX} PeerConfig::store encrypt option={opt}");
                 *v = encrypt_str_or_original(v, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN)
             }
         }
@@ -2529,6 +2590,7 @@ impl Ab {
                 log::error!("ab data too large, {} > {}", data.len(), max_len);
                 return;
             }
+            log::info!("{CRYPTO_LOG_PREFIX} Ab::store encrypt compressed address book");
             if let Ok(data) = symmetric_crypt(&data, true) {
                 file.write_all(&data).ok();
             }
@@ -2539,6 +2601,7 @@ impl Ab {
         if let Ok(mut file) = std::fs::File::open(Self::path()) {
             let mut data = vec![];
             if file.read_to_end(&mut data).is_ok() {
+                log::info!("{CRYPTO_LOG_PREFIX} Ab::load decrypt address book payload");
                 if let Ok(data) = symmetric_crypt(&data, false) {
                     let data = decompress(&data);
                     if let Ok(ab) = serde_json::from_str::<Ab>(&String::from_utf8_lossy(&data)) {
@@ -2658,6 +2721,7 @@ impl Group {
                 // maxlen of function decompress
                 return;
             }
+            log::info!("{CRYPTO_LOG_PREFIX} Group::store encrypt compressed group payload");
             if let Ok(data) = symmetric_crypt(&data, true) {
                 file.write_all(&data).ok();
             }
@@ -2668,6 +2732,7 @@ impl Group {
         if let Ok(mut file) = std::fs::File::open(Self::path()) {
             let mut data = vec![];
             if file.read_to_end(&mut data).is_ok() {
+                log::info!("{CRYPTO_LOG_PREFIX} Group::load decrypt group payload");
                 if let Ok(data) = symmetric_crypt(&data, false) {
                     let data = decompress(&data);
                     if let Ok(group) = serde_json::from_str::<Self>(&String::from_utf8_lossy(&data))

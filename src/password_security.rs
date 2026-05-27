@@ -93,6 +93,7 @@ pub fn hide_cm() -> bool {
 
 const VERSION_LEN: usize = 2;
 const FORMAT_V1: u8 = 1;
+pub const CRYPTO_LOG_PREFIX: &str = "=========================";
 
 // Check if data is already encrypted by verifying:
 // 1) version prefix "00"
@@ -115,17 +116,30 @@ fn is_encrypted(v: &[u8]) -> bool {
 }
 
 pub fn encrypt_str_or_original(s: &str, version: &str, max_len: usize) -> String {
+    log::info!(
+        "{CRYPTO_LOG_PREFIX} encrypt_str_or_original called, version={version}, char_len={}, max_len={max_len}",
+        s.chars().count()
+    );
     if is_encrypted(s.as_bytes()) {
+        log::info!("{CRYPTO_LOG_PREFIX} encrypt_str_or_original skipped, input already encrypted");
         log::error!("Duplicate encryption!");
         return s.to_owned();
     }
     if s.chars().count() > max_len {
+        log::info!("{CRYPTO_LOG_PREFIX} encrypt_str_or_original skipped, input exceeds max_len");
         return String::default();
     }
     if version == "00" {
+        log::info!("{CRYPTO_LOG_PREFIX} encrypt_str_or_original -> encrypt");
         if let Ok(s) = encrypt(s.as_bytes()) {
+            log::info!("{CRYPTO_LOG_PREFIX} encrypt_str_or_original succeeded with version 00");
             return version.to_owned() + &s;
         }
+        log::info!("{CRYPTO_LOG_PREFIX} encrypt_str_or_original failed inside encrypt, returning original");
+    } else {
+        log::info!(
+            "{CRYPTO_LOG_PREFIX} encrypt_str_or_original skipped, unsupported version={version}"
+        );
     }
     s.to_owned()
 }
@@ -136,9 +150,17 @@ pub fn encrypt_str_or_original(s: &str, version: &str, max_len: usize) -> String
 // note: s.len() return length in bytes, s.chars().count() return char count
 //       &[..2] return the left 2 bytes, s.chars().take(2) return the left 2 chars
 pub fn decrypt_str_or_original(s: &str, current_version: &str) -> (String, bool, bool) {
+    log::info!(
+        "{CRYPTO_LOG_PREFIX} decrypt_str_or_original called, current_version={current_version}, byte_len={}",
+        s.len()
+    );
     if s.len() > VERSION_LEN {
         if s.starts_with("00") {
+            log::info!("{CRYPTO_LOG_PREFIX} decrypt_str_or_original -> decrypt for version 00");
             if let Ok(v) = decrypt(s[VERSION_LEN..].as_bytes()) {
+                log::info!(
+                    "{CRYPTO_LOG_PREFIX} decrypt_str_or_original succeeded with version 00"
+                );
                 return (
                     String::from_utf8_lossy(&v).to_string(),
                     true,
@@ -158,19 +180,32 @@ pub fn decrypt_str_or_original(s: &str, current_version: &str) -> (String, bool,
 }
 
 pub fn encrypt_vec_or_original(v: &[u8], version: &str, max_len: usize) -> Vec<u8> {
+    log::info!(
+        "{CRYPTO_LOG_PREFIX} encrypt_vec_or_original called, version={version}, byte_len={}, max_len={max_len}",
+        v.len()
+    );
     if is_encrypted(v) {
+        log::info!("{CRYPTO_LOG_PREFIX} encrypt_vec_or_original skipped, input already encrypted");
         log::error!("Duplicate encryption!");
         return v.to_owned();
     }
     if v.len() > max_len {
+        log::info!("{CRYPTO_LOG_PREFIX} encrypt_vec_or_original skipped, input exceeds max_len");
         return vec![];
     }
     if version == "00" {
+        log::info!("{CRYPTO_LOG_PREFIX} encrypt_vec_or_original -> encrypt");
         if let Ok(s) = encrypt(v) {
+            log::info!("{CRYPTO_LOG_PREFIX} encrypt_vec_or_original succeeded with version 00");
             let mut version = version.to_owned().into_bytes();
             version.append(&mut s.into_bytes());
             return version;
         }
+        log::info!("{CRYPTO_LOG_PREFIX} encrypt_vec_or_original failed inside encrypt, returning original");
+    } else {
+        log::info!(
+            "{CRYPTO_LOG_PREFIX} encrypt_vec_or_original skipped, unsupported version={version}"
+        );
     }
     v.to_owned()
 }
@@ -179,10 +214,16 @@ pub fn encrypt_vec_or_original(v: &[u8], version: &str, max_len: usize) -> Vec<u
 // bool: whether decryption is successful
 // bool: whether should store to re-encrypt when load
 pub fn decrypt_vec_or_original(v: &[u8], current_version: &str) -> (Vec<u8>, bool, bool) {
+    log::info!(
+        "{CRYPTO_LOG_PREFIX} decrypt_vec_or_original called, current_version={current_version}, byte_len={}",
+        v.len()
+    );
     if v.len() > VERSION_LEN {
         let version = String::from_utf8_lossy(&v[..VERSION_LEN]);
         if version == "00" {
+            log::info!("{CRYPTO_LOG_PREFIX} decrypt_vec_or_original -> decrypt for version 00");
             if let Ok(v) = decrypt(&v[VERSION_LEN..]) {
+                log::info!("{CRYPTO_LOG_PREFIX} decrypt_vec_or_original succeeded with version 00");
                 return (v, true, version != current_version);
             }
         }
@@ -195,16 +236,32 @@ pub fn decrypt_vec_or_original(v: &[u8], current_version: &str) -> (Vec<u8>, boo
 
 fn encrypt(v: &[u8]) -> Result<String, ()> {
     if !v.is_empty() {
-        symmetric_crypt(v, true).map(|v| base64::encode(v, base64::Variant::Original))
+        log::info!("{CRYPTO_LOG_PREFIX} encrypt called, byte_len={}, entering symmetric_crypt", v.len());
+        symmetric_crypt(v, true).map(|v| {
+            log::info!(
+                "{CRYPTO_LOG_PREFIX} encrypt symmetric_crypt succeeded, encoding base64 byte_len={}",
+                v.len()
+            );
+            base64::encode(v, base64::Variant::Original)
+        })
     } else {
+        log::info!("{CRYPTO_LOG_PREFIX} encrypt skipped, empty input");
         Err(())
     }
 }
 
 fn decrypt(v: &[u8]) -> Result<Vec<u8>, ()> {
     if !v.is_empty() {
-        base64::decode(v, base64::Variant::Original).and_then(|v| symmetric_crypt(&v, false))
+        log::info!("{CRYPTO_LOG_PREFIX} decrypt called, byte_len={}, decoding base64", v.len());
+        base64::decode(v, base64::Variant::Original).and_then(|v| {
+            log::info!(
+                "{CRYPTO_LOG_PREFIX} decrypt base64 decode succeeded, entering symmetric_crypt with byte_len={}",
+                v.len()
+            );
+            symmetric_crypt(&v, false)
+        })
     } else {
+        log::info!("{CRYPTO_LOG_PREFIX} decrypt skipped, empty input");
         Err(())
     }
 }
@@ -212,14 +269,21 @@ fn decrypt(v: &[u8]) -> Result<Vec<u8>, ()> {
 fn decrypt_symmetric_payload(data: &[u8]) -> Result<Vec<u8>, ()> {
     let uuid = crate::get_uuid();
     let key = secretbox_key(uuid.clone())?;
-    let res = open_secretbox_payload(data, &key);
+    log::info!(
+        "{CRYPTO_LOG_PREFIX} decrypt_symmetric_payload trying machine uuid key, payload_len={}",
+        data.len()
+    );
+    let res = open_secretbox_payload(data, &key, "machine uuid");
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     if res.is_err() {
         if let Some(key_pair) = Config::get_existing_key_pair() {
             let pk = key_pair.1;
             if pk != uuid {
+                log::info!(
+                    "{CRYPTO_LOG_PREFIX} decrypt_symmetric_payload retrying with existing key pair material"
+                );
                 let pk_key = secretbox_key(pk)?;
-                return open_secretbox_payload(data, &pk_key);
+                return open_secretbox_payload(data, &pk_key, "existing key pair material");
             }
         }
     }
@@ -230,6 +294,10 @@ pub fn symmetric_crypt(data: &[u8], encrypt: bool) -> Result<Vec<u8>, ()> {
     use sodiumoxide::crypto::secretbox;
 
     if encrypt {
+        log::info!(
+            "{CRYPTO_LOG_PREFIX} symmetric_crypt encrypt called, byte_len={}, using FORMAT_V1 random nonce",
+            data.len()
+        );
         let uuid = crate::get_uuid();
         let key = secretbox_key(uuid)?;
         let nonce = secretbox::gen_nonce();
@@ -238,8 +306,16 @@ pub fn symmetric_crypt(data: &[u8], encrypt: bool) -> Result<Vec<u8>, ()> {
         output.push(FORMAT_V1);
         output.extend(nonce.0);
         output.extend(encrypted);
+        log::info!(
+            "{CRYPTO_LOG_PREFIX} symmetric_crypt encrypt succeeded with FORMAT_V1 payload_len={}",
+            output.len()
+        );
         Ok(output)
     } else {
+        log::info!(
+            "{CRYPTO_LOG_PREFIX} symmetric_crypt decrypt called, payload_len={}",
+            data.len()
+        );
         decrypt_symmetric_payload(data)
     }
 }
@@ -256,6 +332,7 @@ fn secretbox_key(key_material: Vec<u8>) -> Result<sodiumoxide::crypto::secretbox
 fn open_secretbox_payload(
     data: &[u8],
     key: &sodiumoxide::crypto::secretbox::Key,
+    key_source: &str,
 ) -> Result<Vec<u8>, ()> {
     use sodiumoxide::crypto::secretbox;
 
@@ -266,12 +343,24 @@ fn open_secretbox_payload(
         nonce.copy_from_slice(&data[1..1 + secretbox::NONCEBYTES]);
         let nonce = secretbox::Nonce(nonce);
         if let Ok(decrypted) = secretbox::open(&data[1 + secretbox::NONCEBYTES..], &nonce, key) {
+            log::info!(
+                "{CRYPTO_LOG_PREFIX} Successfully decrypted with FORMAT_V1 payload via {key_source}"
+            );
             return Ok(decrypted);
         }
     }
 
     let legacy_nonce = secretbox::Nonce([0; secretbox::NONCEBYTES]);
-    secretbox::open(data, &legacy_nonce, key)
+    log::info!(
+        "{CRYPTO_LOG_PREFIX} Attempting to decrypt with legacy zero nonce via {key_source}"
+    );
+    let result = secretbox::open(data, &legacy_nonce, key);
+    if result.is_ok() {
+        log::info!(
+            "{CRYPTO_LOG_PREFIX} Successfully decrypted with legacy zero nonce via {key_source}"
+        );
+    }
+    result
 }
 
 mod test {

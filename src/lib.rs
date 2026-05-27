@@ -429,12 +429,12 @@ pub fn init_log(_is_async: bool, _name: &str) -> Option<flexi_logger::LoggerHand
     #[allow(unused_mut)]
     let mut logger_holder: Option<flexi_logger::LoggerHandle> = None;
     INIT.call_once(|| {
-        #[cfg(debug_assertions)]
-        {
-            use env_logger::*;
-            init_from_env(Env::default().filter_or(DEFAULT_FILTER_ENV, "info,reqwest=warn,rustls=warn,webrtc-sctp=warn,webrtc=warn"));
-        }
-        #[cfg(not(debug_assertions))]
+        // #[cfg(debug_assertions)]
+        // {
+        //     use env_logger::*;
+        //     init_from_env(Env::default().filter_or(DEFAULT_FILTER_ENV, "info,reqwest=warn,rustls=warn,webrtc-sctp=warn,webrtc=warn"));
+        // }
+        // #[cfg(not(debug_assertions))]
         {
             // https://docs.rs/flexi_logger/latest/flexi_logger/error_info/index.html#write
             // though async logger more efficient, but it also causes more problems, disable it for now
