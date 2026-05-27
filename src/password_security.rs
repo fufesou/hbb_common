@@ -92,6 +92,7 @@ pub fn hide_cm() -> bool {
 }
 
 const VERSION_LEN: usize = 2;
+pub const CRYPTO_LOG_PREFIX: &str = "=========================";
 
 // Check if data is already encrypted by verifying:
 // 1) version prefix "00"

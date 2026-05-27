@@ -3,7 +3,7 @@ use sodiumoxide::base64;
 
 use crate::{
     log,
-    password_security::{decrypt_str_or_original, symmetric_crypt},
+    password_security::{decrypt_str_or_original, symmetric_crypt, CRYPTO_LOG_PREFIX},
 };
 
 pub(super) const PASSWORD_ENC_VERSION: &str = "00";
@@ -75,6 +75,9 @@ fn encrypt_permanent_password_storage(storage: &str) -> Option<String> {
     if storage.chars().count() > ENCRYPT_MAX_LEN {
         return None;
     }
+    log::info!(
+        "{CRYPTO_LOG_PREFIX} encrypt_permanent_password_storage encrypt current permanent password storage"
+    );
     let encrypted = symmetric_crypt(storage.as_bytes(), true).ok()?;
     Some(
         PERMANENT_PASSWORD_ENC_VERSION.to_owned()
@@ -83,12 +86,24 @@ fn encrypt_permanent_password_storage(storage: &str) -> Option<String> {
 }
 
 pub(super) fn decrypt_permanent_password_str_or_original(storage: &str) -> (String, bool, bool) {
+    log::info!(
+        "{CRYPTO_LOG_PREFIX} decrypt_permanent_password_str_or_original called, byte_len={}",
+        storage.len()
+    );
     if storage.len() > VERSION_LEN && storage.starts_with(PERMANENT_PASSWORD_ENC_VERSION) {
         if let Ok(decoded) = base64::decode(
             &storage.as_bytes()[VERSION_LEN..],
             base64::Variant::Original,
         ) {
+            log::info!(
+                "{CRYPTO_LOG_PREFIX} decrypt_permanent_password_str_or_original -> symmetric_crypt for version {}",
+                PERMANENT_PASSWORD_ENC_VERSION
+            );
             if let Ok(v) = symmetric_crypt(&decoded, false) {
+                log::info!(
+                    "{CRYPTO_LOG_PREFIX} decrypt_permanent_password_str_or_original succeeded for version {}",
+                    PERMANENT_PASSWORD_ENC_VERSION
+                );
                 return (String::from_utf8_lossy(&v).to_string(), true, false);
             }
         }
@@ -105,6 +120,9 @@ pub fn local_permanent_password_storage_is_usable_for_auth(storage: &str, salt: 
         return !salt.is_empty();
     }
     if storage.starts_with(PERMANENT_PASSWORD_ENC_VERSION) {
+        log::info!(
+            "{CRYPTO_LOG_PREFIX} local_permanent_password_storage_is_usable_for_auth decrypt current permanent password storage"
+        );
         let (_, decrypted, _) = decrypt_permanent_password_str_or_original(storage);
         if decrypted {
             log::error!("Permanent password storage looks current but cannot be decoded as a hash");
@@ -178,6 +196,9 @@ pub fn decode_permanent_password_h1_from_storage(
     storage: &str,
 ) -> Option<[u8; PERMANENT_PASSWORD_H1_LEN]> {
     if storage.starts_with(PERMANENT_PASSWORD_ENC_VERSION) {
+        log::info!(
+            "{CRYPTO_LOG_PREFIX} decode_permanent_password_h1_from_storage decrypt current permanent password storage"
+        );
         let (hashed_storage, decrypted, _) = decrypt_permanent_password_str_or_original(storage);
         if !decrypted {
             return None;
@@ -199,6 +220,9 @@ pub(super) fn password_is_empty_or_not_hashed(permanent_password_storage: &str) 
     if permanent_password_storage.starts_with(PERMANENT_PASSWORD_ENC_VERSION) {
         return false;
     }
+    log::info!(
+        "{CRYPTO_LOG_PREFIX} password_is_empty_or_not_hashed decrypt legacy permanent password storage"
+    );
     let (_, decrypted, looks_like_plaintext) =
         decrypt_str_or_original(permanent_password_storage, PASSWORD_ENC_VERSION);
     decrypted || looks_like_plaintext
