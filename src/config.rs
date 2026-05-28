@@ -3294,6 +3294,48 @@ mod tests {
         test()
     }
 
+    fn legacy_zero_nonce_encrypt(data: &[u8]) -> Vec<u8> {
+        use sodiumoxide::crypto::secretbox;
+        use std::convert::TryInto;
+
+        let mut keybuf = crate::get_uuid();
+        keybuf.resize(secretbox::KEYBYTES, 0);
+        let key = secretbox::Key(keybuf.try_into().unwrap());
+        let nonce = secretbox::Nonce([0; secretbox::NONCEBYTES]);
+        secretbox::seal(data, &nonce, &key)
+    }
+
+    fn legacy_zero_nonce_str_storage(data: &str) -> String {
+        PASSWORD_ENC_VERSION.to_owned()
+            + &base64::encode(
+                legacy_zero_nonce_encrypt(data.as_bytes()),
+                base64::Variant::Original,
+            )
+    }
+
+    fn legacy_zero_nonce_vec_storage(data: &[u8]) -> Vec<u8> {
+        let mut storage = PASSWORD_ENC_VERSION.as_bytes().to_vec();
+        storage.extend(
+            base64::encode(legacy_zero_nonce_encrypt(data), base64::Variant::Original).bytes(),
+        );
+        storage
+    }
+
+    fn encrypted_cache_payload(json: &str, legacy: bool) -> Vec<u8> {
+        let data = compress(json.as_bytes());
+        if legacy {
+            legacy_zero_nonce_encrypt(&data)
+        } else {
+            symmetric_crypt(&data, true).unwrap()
+        }
+    }
+
+    fn decrypt_cache_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> T {
+        let data = symmetric_crypt(payload, false).unwrap();
+        let data = decompress(&data);
+        serde_json::from_str(&String::from_utf8_lossy(&data)).unwrap()
+    }
+
     #[test]
     fn test_serialize() {
         let cfg: Config = Default::default();
@@ -3302,6 +3344,169 @@ mod tests {
         let cfg: PeerConfig = Default::default();
         let res = toml::to_string_pretty(&cfg);
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_previous_release_main_config_values_decrypt() {
+        let id = "123456789";
+        let storage = legacy_zero_nonce_str_storage(id);
+        let (decrypted, success, store) = decrypt_str_or_original(&storage, PASSWORD_ENC_VERSION);
+        assert_eq!(decrypted, id);
+        assert!(success);
+        assert!(!store);
+
+        let mut config = Config::default();
+        config.password = legacy_zero_nonce_str_storage("legacy-secret");
+        config.salt = "salt123".to_owned();
+        Config::validate_or_decrypt_permanent_password_storage(&mut config).unwrap();
+        assert_eq!(config.password, "legacy-secret");
+        assert_eq!(config.salt, "salt123");
+    }
+
+    #[test]
+    fn test_previous_release_peer_config_values_decrypt() {
+        let mut config = PeerConfig::default();
+        config.password = legacy_zero_nonce_vec_storage(b"peer-password");
+        config.options.insert(
+            "rdp_password".to_owned(),
+            legacy_zero_nonce_str_storage("rdp-secret"),
+        );
+        config.options.insert(
+            "os-username".to_owned(),
+            legacy_zero_nonce_str_storage("desktop-user"),
+        );
+        config.options.insert(
+            "os-password".to_owned(),
+            legacy_zero_nonce_str_storage("desktop-secret"),
+        );
+
+        let (password, success, store) =
+            decrypt_vec_or_original(&config.password, PASSWORD_ENC_VERSION);
+        assert_eq!(password, b"peer-password");
+        assert!(success);
+        assert!(!store);
+
+        for (key, value) in [
+            ("rdp_password", "rdp-secret"),
+            ("os-username", "desktop-user"),
+            ("os-password", "desktop-secret"),
+        ] {
+            let (decrypted, success, store) =
+                decrypt_str_or_original(&config.options[key], PASSWORD_ENC_VERSION);
+            assert_eq!(decrypted, value);
+            assert!(success);
+            assert!(!store);
+        }
+    }
+
+    #[test]
+    fn test_previous_release_config2_values_decrypt() {
+        let mut config = Config2 {
+            unlock_pin: legacy_zero_nonce_str_storage("135790"),
+            socks: Some(Socks5Server {
+                proxy: "127.0.0.1:1080".to_owned(),
+                username: "proxy-user".to_owned(),
+                password: legacy_zero_nonce_str_storage("proxy-secret"),
+            }),
+            ..Default::default()
+        };
+
+        if let Some(socks) = config.socks.as_mut() {
+            let (password, success, store) =
+                decrypt_str_or_original(&socks.password, PASSWORD_ENC_VERSION);
+            socks.password = password;
+            assert!(success);
+            assert!(!store);
+        }
+        let (unlock_pin, success, store) =
+            decrypt_str_or_original(&config.unlock_pin, PASSWORD_ENC_VERSION);
+        config.unlock_pin = unlock_pin;
+        assert!(success);
+        assert!(!store);
+
+        let socks = config.socks.unwrap();
+        assert_eq!(socks.password, "proxy-secret");
+        assert_eq!(config.unlock_pin, "135790");
+    }
+
+    #[test]
+    fn test_previous_release_trusted_devices_decrypt() {
+        let devices = vec![TrustedDevice {
+            hwid: Bytes::from_static(b"hwid-1"),
+            time: crate::get_time(),
+            id: "123456789".to_owned(),
+            name: "workstation".to_owned(),
+            platform: "Windows".to_owned(),
+        }];
+        let json = serde_json::to_string(&devices).unwrap();
+        let storage = legacy_zero_nonce_str_storage(&json);
+
+        let (decrypted, success, store) = decrypt_str_or_original(&storage, PASSWORD_ENC_VERSION);
+        assert!(success);
+        assert!(!store);
+
+        let parsed: Vec<TrustedDevice> = serde_json::from_str(&decrypted).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(&parsed[0].hwid[..], b"hwid-1");
+        assert_eq!(parsed[0].id, "123456789");
+        assert_eq!(parsed[0].name, "workstation");
+        assert_eq!(parsed[0].platform, "Windows");
+    }
+
+    #[test]
+    fn test_address_book_cache_payloads_decrypt_and_deserialize() {
+        let json = r#"{
+            "access_token": "token-1",
+            "ab_entries": [{
+                "guid": "guid-1",
+                "name": "My address book",
+                "peers": [{
+                    "id": "123456789",
+                    "username": "alice",
+                    "hostname": "workstation",
+                    "platform": "Windows",
+                    "alias": "desk",
+                    "tags": ["office"]
+                }],
+                "tags": ["office"],
+                "tag_colors": "{}"
+            }]
+        }"#;
+
+        for legacy in [true, false] {
+            let payload = encrypted_cache_payload(json, legacy);
+            let ab: Ab = decrypt_cache_payload(&payload);
+            assert_eq!(ab.access_token, "token-1");
+            assert_eq!(ab.ab_entries.len(), 1);
+            assert_eq!(ab.ab_entries[0].peers.len(), 1);
+            assert_eq!(ab.ab_entries[0].peers[0].id, "123456789");
+        }
+    }
+
+    #[test]
+    fn test_group_cache_payloads_decrypt_and_deserialize() {
+        let json = r#"{
+            "access_token": "token-1",
+            "device_groups": [{"name": "Engineering"}],
+            "users": [{"name": "alice", "display_name": "Alice"}],
+            "peers": [{
+                "id": "123456789",
+                "username": "alice",
+                "hostname": "workstation",
+                "platform": "Windows",
+                "login_name": "alice"
+            }]
+        }"#;
+
+        for legacy in [true, false] {
+            let payload = encrypted_cache_payload(json, legacy);
+            let group: Group = decrypt_cache_payload(&payload);
+            assert_eq!(group.access_token, "token-1");
+            assert_eq!(group.device_groups.len(), 1);
+            assert_eq!(group.users.len(), 1);
+            assert_eq!(group.peers.len(), 1);
+            assert_eq!(group.peers[0].id, "123456789");
+        }
     }
 
     #[test]

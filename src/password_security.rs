@@ -536,6 +536,30 @@ mod test {
     }
 
     #[test]
+    fn test_encrypt_id_uses_legacy_zero_nonce_payload() {
+        use super::*;
+        use std::convert::TryInto;
+
+        let id = "123456789";
+        let encrypted = encrypt_id_str_or_original_legacy_nonce(id, "00", 128);
+        let decoded = base64::decode(
+            &encrypted.as_bytes()[VERSION_LEN..],
+            base64::Variant::Original,
+        )
+        .unwrap();
+
+        let mut keybuf = crate::get_uuid();
+        keybuf.resize(secretbox::KEYBYTES, 0);
+        let key = secretbox::Key(keybuf.try_into().unwrap());
+        let nonce = secretbox::Nonce([0; secretbox::NONCEBYTES]);
+
+        assert_eq!(
+            secretbox::open(&decoded, &nonce, &key).unwrap(),
+            id.as_bytes()
+        );
+    }
+
+    #[test]
     fn test_decrypt_legacy_payload_starting_with_v1_marker() {
         use super::*;
         use std::convert::TryInto;
