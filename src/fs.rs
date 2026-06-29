@@ -1196,12 +1196,56 @@ impl TransferJob {
     }
 }
 
+fn peer_file_transfer_error(error: &str) -> &'static str {
+    if error.trim() == "one-way-file-transfer-tip" {
+        return "one-way-file-transfer-tip";
+    }
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("permission denied") || lower.contains("access is denied") {
+        return "permission denied";
+    }
+    if lower.contains("not found")
+        || lower.contains("no such file")
+        || lower.contains("cannot find the file")
+        || lower.contains("cannot find the path")
+    {
+        return "not found";
+    }
+    if lower.contains("already exists") || lower.contains("file exists") {
+        return "already exists";
+    }
+    if lower.contains("too many files") || lower.contains("exceeds limit") {
+        return "too many files";
+    }
+    if lower.contains("invalid")
+        || lower.contains("path traversal")
+        || lower.contains("absolute path")
+        || lower.contains("null byte")
+        || lower.contains("null bytes")
+        || lower.contains("symlink")
+        || lower.contains("empty file name")
+    {
+        return "invalid path";
+    }
+    "internal error"
+}
+
 #[inline]
 pub fn new_error<T: std::string::ToString>(id: i32, err: T, file_num: i32) -> Message {
+    let error = err.to_string();
+    let peer_error = peer_file_transfer_error(&error);
+    if error.trim() != peer_error {
+        log::warn!(
+            "File transfer error hidden from peer, id={}, file_num={}: {}",
+            id,
+            file_num,
+            error
+        );
+    }
     let mut resp = FileResponse::new();
     resp.set_error(FileTransferError {
         id,
-        error: err.to_string(),
+        error: peer_error.to_string(),
         file_num,
         ..Default::default()
     });
