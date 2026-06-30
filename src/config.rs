@@ -2963,6 +2963,7 @@ pub mod keys {
     pub const OPTION_FILE_TRANSFER_MAX_FILES: &str = "file-transfer-max-files";
     pub const OPTION_DISABLE_UDP: &str = "disable-udp";
     pub const OPTION_ALLOW_INSECURE_TLS_FALLBACK: &str = "allow-insecure-tls-fallback";
+    pub const OPTION_ALLOW_INSECURE_SESSION_FALLBACK: &str = "allow-insecure-session-fallback";
     pub const OPTION_SHOW_VIRTUAL_MOUSE: &str = "show-virtual-mouse";
     // joystick is the virtual mouse.
     // So `OPTION_SHOW_VIRTUAL_MOUSE` should also be set if `OPTION_SHOW_VIRTUAL_JOYSTICK` is set.
@@ -3181,6 +3182,7 @@ pub mod keys {
         OPTION_ICE_SERVERS,
         OPTION_DISABLE_UDP,
         OPTION_ALLOW_INSECURE_TLS_FALLBACK,
+        OPTION_ALLOW_INSECURE_SESSION_FALLBACK,
         OPTION_KEEP_AWAKE_DURING_INCOMING_SESSIONS,
         OPTION_ALLOW_AUTO_UPDATE,
     ];
