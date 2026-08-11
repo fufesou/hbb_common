@@ -94,6 +94,23 @@ fn verify(fixture: &Fixture) -> ResultType<VerifiedUpdateArtifact> {
 }
 
 #[test]
+#[ignore = "requires the configured update public key"]
+fn embedded_update_public_key_matches_configuration() {
+    let configured_key = STANDARD
+        .decode(
+            std::env::var("RUSTDESK_UPDATE_ED25519_PUBLIC_KEY")
+                .expect("RUSTDESK_UPDATE_ED25519_PUBLIC_KEY must be configured"),
+        )
+        .expect("configured update public key must use valid base64");
+    let embedded_key = TRUSTED_UPDATE_KEYS
+        .iter()
+        .find(|key| key.key_id == "2026-ed25519-main")
+        .expect("embedded update public key must exist");
+
+    assert_eq!(configured_key.as_slice(), &embedded_key.public_key[..]);
+}
+
+#[test]
 fn accepts_valid_metadata_and_signature() {
     let artifact = verify(&valid_fixture()).expect("verified artifact");
     assert_eq!("rustdesk-1.4.6-x86_64.exe", artifact.file_name);
