@@ -378,6 +378,7 @@ message FileDirectory {
 message ReadDir {
   string path = 1;
   bool include_hidden = 2;
+  int32 id = 3;
 }
 
 message ReadEmptyDirs {
