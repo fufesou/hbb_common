@@ -799,17 +799,6 @@ message SwitchSidesResponse {
 
 message SwitchBack {}
 
-message PluginRequest {
-  string id = 1;
-  bytes content = 2;
-}
-
-message PluginFailure {
-  string id = 1;
-  string name = 2;
-  string msg = 3;
-}
-
 message WindowsSessions {
   repeated WindowsSession sessions = 1;
   uint32 current_sid = 2;
@@ -823,6 +812,7 @@ message MessageQuery {
 }
 
 message Misc {
+  reserved 25, 26;
   oneof union {
     ChatMessage chat_message = 4;
     SwitchDisplay switch_display = 5;
@@ -845,8 +835,6 @@ message Misc {
     // Deprecated since 1.2.4, use `change_display_resolution` (36) instead.
     // But we must keep it for compatibility when peer version < 1.2.4.
     Resolution change_resolution = 24;
-    PluginRequest plugin_request = 25;
-    PluginFailure plugin_failure = 26;
     uint32 full_speed_fps = 27; // deprecated
     uint32 auto_adjust_fps = 28;
     bool client_record_status = 29;
