@@ -81,6 +81,8 @@ message PunchHole {
   ControlPermissions control_permissions = 8;
   ControlledContext controlled_context = 9;
   string webrtc_sdp_offer = 10;
+  // Echoed by the target to authorize replies from a different egress IP.
+  bytes relay_reply_token = 12;
 }
 
 message TestNatRequest {
@@ -108,6 +110,7 @@ message PunchHoleSent {
   int32 upnp_port = 6;
   bytes socket_addr_v6 = 7;
   string webrtc_sdp_answer = 8;
+  bytes relay_reply_token = 9;
 }
 
 message RegisterPk {
@@ -173,6 +176,7 @@ message RequestRelay {
   ControlPermissions control_permissions = 9;
   ControlledContext controlled_context = 10;
   string switch_code = 11;
+  bytes relay_reply_token = 12;
 }
 
 message RelayResponse {
@@ -189,6 +193,7 @@ message RelayResponse {
   bytes socket_addr_v6 = 10;
   int32 upnp_port = 11;
   string webrtc_sdp_answer = 12;
+  bytes relay_reply_token = 13;
 }
 
 message SoftwareUpdate { string url = 1; }
@@ -203,6 +208,7 @@ message FetchLocalAddr {
   bytes socket_addr_v6 = 3;
   ControlPermissions control_permissions = 4;
   ControlledContext controlled_context = 5;
+  bytes relay_reply_token = 6;
 }
 
 message LocalAddr {
@@ -212,6 +218,7 @@ message LocalAddr {
   string id = 4;
   string version = 5;
   bytes socket_addr_v6 = 6;
+  bytes relay_reply_token = 7;
 }
 
 message PeerDiscovery {
