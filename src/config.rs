@@ -506,12 +506,11 @@ impl Config2 {
             config.socks = Some(socks);
             store |= store2;
         }
-        let (unlock_pin, _, store2) =
+        let (unlock_pin, _, migrate_pin) =
             decrypt_str_or_original(&config.unlock_pin, PASSWORD_ENC_VERSION);
         config.unlock_pin = unlock_pin;
-        store |= store2;
-        if store {
-            config.store();
+        if store || migrate_pin {
+            config.store_with_pin(migrate_pin.then_some(config.unlock_pin.as_str()));
         }
         config
     }
@@ -521,6 +520,10 @@ impl Config2 {
     }
 
     fn store(&self) {
+        self.store_with_pin(None);
+    }
+
+    fn store_with_pin(&self, pin: Option<&str>) {
         let mut config = self.clone();
         let stored = match try_load_path_for_store::<Self>(Self::file()) {
             Ok(mut stored) => {
@@ -557,8 +560,11 @@ impl Config2 {
                 keep_encrypted_storage_if_plaintext_unchanged(&socks.password, stored_password);
             config.socks = Some(socks);
         }
-        config.unlock_pin =
-            keep_encrypted_storage_if_plaintext_unchanged(&config.unlock_pin, &stored.unlock_pin);
+        // Another process may have changed or cleared the PIN since this snapshot was loaded.
+        config.unlock_pin = match pin {
+            Some(pin) => keep_encrypted_storage_if_plaintext_unchanged(pin, &stored.unlock_pin),
+            None => stored.unlock_pin,
+        };
         Config::store_(&config, "2");
     }
 
@@ -637,7 +643,7 @@ impl Config2 {
             return false;
         }
         *lock = cfg;
-        lock.store();
+        lock.store_with_pin(Some(&lock.unlock_pin));
         true
     }
 }
@@ -1723,7 +1729,7 @@ impl Config {
             return;
         }
         config.unlock_pin = pin.to_string();
-        config.store();
+        config.store_with_pin(Some(pin));
     }
 
     pub fn get() -> Config {
@@ -3321,27 +3327,28 @@ mod tests {
     }
 
     #[test]
-    fn test_config2_store_keeps_existing_unlock_pin_when_pin_is_unchanged() {
+    fn test_ordinary_option_save_preserves_the_stored_unlock_pin() {
         let _guard = CONFIG_STATE_TEST_LOCK.lock().unwrap();
         let _file_guard = ConfigFileRestoreGuard::new(Config::file_("2"));
-        let pin = "123456";
-        let original_unlock_pin =
-            encrypt_str_or_original(pin, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
-        let mut cfg = Config2 {
-            unlock_pin: original_unlock_pin.clone(),
+        let gui = Config2 {
+            unlock_pin: "123456".into(),
+            options: HashMap::from([("allow-auto-record-incoming".into(), "Y".into())]),
             ..Default::default()
         };
-        Config::store_(&cfg, "2");
-        let (unlock_pin, decrypted, _) =
-            decrypt_str_or_original(&cfg.unlock_pin, PASSWORD_ENC_VERSION);
-        assert!(decrypted);
-        cfg.unlock_pin = unlock_pin;
-        cfg.nat_type = 1;
 
-        cfg.store();
+        for pin in ["123456", "654321", ""] {
+            let stored_pin = encrypt_str_or_original(pin, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
+            let host = Config2 {
+                unlock_pin: stored_pin.clone(),
+                ..Default::default()
+            };
+            Config::store_(&host, "2");
+            gui.store();
 
-        let stored = Config::load_::<Config2>("2");
-        assert_eq!(stored.unlock_pin, original_unlock_pin);
+            let saved = Config::load_::<Config2>("2");
+            assert_eq!(saved.unlock_pin, stored_pin);
+            assert_eq!(saved.options, gui.options);
+        }
     }
 
     #[test]
