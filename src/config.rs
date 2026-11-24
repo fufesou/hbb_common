@@ -1130,6 +1130,20 @@ impl Config {
         config.store();
     }
 
+    /// The installed host persists its ID. A GUI write here could restore stale credentials.
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
+    pub fn cache_host_id(id: &str) {
+        let mut config = CONFIG.write().unwrap();
+        if config.id == id {
+            return;
+        }
+        config.id = id.into();
+        if config.key_confirmed {
+            config.key_confirmed = false;
+            config.keys_confirmed.clear();
+        }
+    }
+
     pub fn set_nat_type(nat_type: i32) {
         let mut config = CONFIG2.write().unwrap();
         if nat_type == config.nat_type {
