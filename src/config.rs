@@ -1130,6 +1130,20 @@ impl Config {
         config.store();
     }
 
+    /// The installed host persists its ID. A GUI write here could restore stale credentials.
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
+    pub fn cache_host_id(id: &str) {
+        let mut config = CONFIG.write().unwrap();
+        if config.id == id {
+            return;
+        }
+        config.id = id.into();
+        if config.key_confirmed {
+            config.key_confirmed = false;
+            config.keys_confirmed.clear();
+        }
+    }
+
     pub fn set_nat_type(nat_type: i32) {
         let mut config = CONFIG2.write().unwrap();
         if nat_type == config.nat_type {
@@ -3317,6 +3331,34 @@ mod tests {
             assert!(encrypted);
             assert_eq!(stored_id, updated_id);
             assert_eq!(Config::get().id, updated_id);
+        });
+    }
+
+    #[test]
+    fn test_host_id_refresh_preserves_the_stored_permanent_password() {
+        let gui = Config {
+            id: "123456789".into(),
+            key_confirmed: true,
+            ..Default::default()
+        };
+        with_config_and_hard_settings(gui, HashMap::new(), || {
+            let _file_guard = ConfigFileRestoreGuard::new(Config::file());
+            let mut host = Config {
+                id: "987654321".into(),
+                ..Default::default()
+            };
+            host.password =
+                Config::compute_permanent_password_storage_for_update(&mut host, "test password")
+                    .unwrap();
+            host.store();
+
+            Config::cache_host_id(&host.id);
+
+            assert_eq!(Config::get_id(), host.id);
+            assert!(!Config::get_key_confirmed());
+            let saved = Config::load();
+            assert!(saved.password == host.password, "stored password changed");
+            assert_eq!(saved.salt, host.salt);
         });
     }
 
