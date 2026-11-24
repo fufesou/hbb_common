@@ -627,6 +627,14 @@ impl Config2 {
         })
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
+    pub fn without_unlock_pin(self) -> Self {
+        Self {
+            unlock_pin: String::new(),
+            ..self
+        }
+    }
+
     pub fn get() -> Config2 {
         return CONFIG2.read().unwrap().clone();
     }
@@ -1144,6 +1152,21 @@ impl Config {
         }
     }
 
+    /// A GUI snapshot omits the host PIN and must never be written back as a full config.
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
+    pub fn cache_host_config(config: Config, config2: Config2) {
+        let key_pair = (!config.key_pair.0.is_empty()).then(|| config.key_pair.clone());
+        *CONFIG.write().unwrap() = config;
+        {
+            let mut local = CONFIG2.write().unwrap();
+            *local = Config2 {
+                unlock_pin: std::mem::take(&mut local.unlock_pin),
+                ..config2
+            };
+        }
+        *KEY_PAIR.lock().unwrap() = key_pair;
+    }
+
     pub fn set_nat_type(nat_type: i32) {
         let mut config = CONFIG2.write().unwrap();
         if nat_type == config.nat_type {
@@ -1619,14 +1642,6 @@ impl Config {
             Config::set_salt(&salt);
         }
         salt
-    }
-
-    /// The host persists the proxy. Refreshing the GUI must not write its stale settings to disk.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn cache_host_socks(socks: Option<Socks5Server>) {
-        if Self::get_socks() != socks {
-            CONFIG2.write().unwrap().socks = socks;
-        }
     }
 
     pub fn set_socks(socks: Option<Socks5Server>) {
@@ -3134,6 +3149,49 @@ mod tests {
         let cfg: PeerConfig = Default::default();
         let res = toml::to_string_pretty(&cfg);
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn gui_snapshot_refreshes_config_in_memory_and_preserves_the_local_pin() {
+        let _lock = CONFIG_STATE_TEST_LOCK.lock().unwrap();
+        let _config = ConfigStateTestGuard::new(Config::default(), HashMap::new());
+        let previous = Config2::get();
+        let previous_key = KEY_PAIR.lock().unwrap().clone();
+        let files = [Config::file(), Config2::file()].map(ConfigFileRestoreGuard::new);
+        CONFIG2.write().unwrap().unlock_pin = "local-test-pin".into();
+        let host = Config {
+            id: "123456789".into(),
+            key_pair: (vec![1; 64], vec![2; 32]),
+            ..Default::default()
+        };
+        let host2 = Config2 {
+            unlock_pin: "host-test-pin".into(),
+            nat_type: 2,
+            socks: Some(Socks5Server {
+                proxy: "localhost:1080".into(),
+                ..Default::default()
+            }),
+            options: HashMap::from([("gui-test".into(), "host".into())]),
+            ..Default::default()
+        };
+        let snapshot = host2.clone().without_unlock_pin();
+        assert!(snapshot.unlock_pin.is_empty());
+        Config::cache_host_config(host.clone(), snapshot);
+
+        let received = Config2::get();
+        let key = Config::get_cached_pk();
+        *CONFIG2.write().unwrap() = previous;
+        *KEY_PAIR.lock().unwrap() = previous_key;
+        assert!(Config::get() == host);
+        assert_eq!(key, Some(host.key_pair.1));
+        let expected = Config2 {
+            unlock_pin: "local-test-pin".into(),
+            ..host2
+        };
+        assert!(received == expected);
+        assert!(files
+            .iter()
+            .all(|f| fs::read(&f.path).ok() == f.original_content));
     }
 
     #[test]
