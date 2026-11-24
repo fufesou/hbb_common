@@ -1627,6 +1627,14 @@ impl Config {
         salt
     }
 
+    /// The host persists the proxy. Refreshing the GUI must not write its stale settings to disk.
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
+    pub fn cache_host_socks(socks: Option<Socks5Server>) {
+        if Self::get_socks() != socks {
+            CONFIG2.write().unwrap().socks = socks;
+        }
+    }
+
     pub fn set_socks(socks: Option<Socks5Server>) {
         if OVERWRITE_SETTINGS
             .read()
@@ -3366,6 +3374,33 @@ mod tests {
             assert!(saved.password == host.password, "stored password changed");
             assert_eq!(saved.salt, host.salt);
         });
+    }
+
+    #[test]
+    fn test_host_proxy_refresh_is_memory_only() {
+        let _guard = CONFIG_STATE_TEST_LOCK.lock().unwrap();
+        let original = Config2::get().socks;
+        let file = ConfigFileRestoreGuard::new(Config2::file());
+        let host = Config2 {
+            socks: Some(Socks5Server {
+                proxy: "http://127.0.0.1:3108".into(),
+                ..Default::default()
+            }),
+            options: HashMap::from([("allow-auto-record-incoming".into(), "Y".into())]),
+            ..Default::default()
+        };
+        Config::store_(&host, "2");
+        let saved = fs::read(&file.path).unwrap();
+
+        Config::cache_host_socks(host.socks.clone());
+        let cached = Config::get_socks();
+        Config::cache_host_socks(None);
+        let cleared = Config::get_socks();
+        CONFIG2.write().unwrap().socks = original;
+
+        assert!(cached == host.socks);
+        assert!(cleared.is_none());
+        assert!(fs::read(&file.path).unwrap() == saved);
     }
 
     #[test]
