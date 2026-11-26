@@ -247,7 +247,7 @@ pub struct Config2 {
     serial: i32,
     #[serde(default, deserialize_with = "deserialize_string")]
     #[cfg_attr(
-        any(target_os = "linux", target_os = "macos"),
+        any(windows, target_os = "linux", target_os = "macos"),
         serde(skip_serializing_if = "String::is_empty")
     )]
     unlock_pin: String,
@@ -502,10 +502,40 @@ fn patch(path: PathBuf) -> PathBuf {
 }
 
 impl Config2 {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     pub fn without_unlock_pin(mut self) -> Self {
         self.unlock_pin.clear();
         self
+    }
+
+    #[cfg(windows)]
+    pub fn migrate_unlock_pin(
+        save: impl FnOnce(&str) -> crate::ResultType<()>,
+    ) -> crate::ResultType<()> {
+        let mut current = CONFIG2.write().unwrap();
+        Self::migrate_unlock_pin_at(&Self::file(), save)?;
+        current.unlock_pin.clear();
+        Ok(())
+    }
+
+    #[cfg(any(windows, test))]
+    fn migrate_unlock_pin_at(
+        path: &Path,
+        save: impl FnOnce(&str) -> crate::ResultType<()>,
+    ) -> crate::ResultType<()> {
+        let mut stored: Self = try_load_path(path.to_owned())?;
+        let (pin, decoded, plain) =
+            decrypt_str_or_original(&stored.unlock_pin, PASSWORD_ENC_VERSION);
+        anyhow::ensure!(
+            stored.unlock_pin.is_empty() || decoded || plain,
+            "Could not decode the legacy unlock PIN"
+        );
+        save(&pin)?;
+        if !stored.unlock_pin.is_empty() {
+            stored.unlock_pin.clear();
+            store_path(path.to_owned(), stored)?;
+        }
+        Ok(())
     }
 
     fn load() -> Config2 {
@@ -3332,9 +3362,33 @@ mod tests {
         });
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn unlock_pin_is_excluded_from_unix_sync_snapshots() {
+    fn unlock_pin_migration_keeps_the_source_until_the_service_saves_it() {
+        let dir = std::env::temp_dir().join(format!("rd-pin-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let file = dir.join("config2.toml");
+        let original = Config2 {
+            unlock_pin: "fixture-pin".into(),
+            nat_type: 3,
+            ..Default::default()
+        };
+        store_path(file.clone(), &original).unwrap();
+        assert!(Config2::migrate_unlock_pin_at(&file, |_| Err(anyhow!("write failed"))).is_err());
+        assert_eq!(try_load_path::<Config2>(file.clone()).unwrap(), original);
+        Config2::migrate_unlock_pin_at(&file, |pin| {
+            assert_eq!(pin, "fixture-pin");
+            Ok(())
+        })
+        .unwrap();
+        let migrated: Config2 = try_load_path(file).unwrap();
+        assert!(migrated.unlock_pin.is_empty());
+        assert_eq!(migrated.nat_type, original.nat_type);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn unlock_pin_is_excluded_from_desktop_sync_snapshots() {
         let original = Config2 {
             unlock_pin: "fixture-pin".into(),
             nat_type: 3,
