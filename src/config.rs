@@ -21,6 +21,8 @@ use sodiumoxide::crypto::sign;
 mod permanent_password;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod unix_unlock_pin;
+#[cfg(windows)]
+mod windows_unlock_pin;
 
 pub use permanent_password::{
     compute_permanent_password_h1, decode_permanent_password_h1_from_storage,
@@ -533,8 +535,29 @@ impl Config2 {
         save(&pin)?;
         if !stored.unlock_pin.is_empty() {
             stored.unlock_pin.clear();
-            store_path(path.to_owned(), stored)?;
+            stored.store_preserving_modified(path)?;
         }
+        Ok(())
+    }
+
+    #[cfg(any(windows, test))]
+    fn store_preserving_modified(&self, path: &Path) -> crate::ResultType<()> {
+        // Windows config import selects the newer file, including during service reinstallation.
+        let modified = fs::metadata(path)?.modified()?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("Missing config directory"))?;
+        #[cfg(windows)]
+        let mut replacement =
+            tempfile::Builder::new().make_in(parent, windows_unlock_pin::private_file)?;
+        #[cfg(not(windows))]
+        let mut replacement = tempfile::NamedTempFile::new_in(parent)?;
+        replacement.write_all(toml::to_string_pretty(self)?.as_bytes())?;
+        replacement.as_file().set_modified(modified)?;
+        #[cfg(windows)]
+        windows_unlock_pin::replace(path, &replacement.into_temp_path())?;
+        #[cfg(not(windows))]
+        replacement.persist(path)?;
         Ok(())
     }
 
@@ -548,11 +571,21 @@ impl Config2 {
             config.socks = Some(socks);
             store |= store2;
         }
-        let (unlock_pin, _, store2) =
+        let (unlock_pin, _, reencrypt_pin) =
             decrypt_str_or_original(&config.unlock_pin, PASSWORD_ENC_VERSION);
         config.unlock_pin = unlock_pin;
-        store |= store2;
+        store |= reencrypt_pin;
         if store {
+            #[cfg(windows)]
+            if reencrypt_pin {
+                // Loading the cache can re-encrypt a plaintext PIN before migration takes its lock.
+                config.store_with(|stored| {
+                    if let Err(err) = stored.store_preserving_modified(&Self::file()) {
+                        log::error!("Failed to re-encrypt the legacy unlock PIN: {err}");
+                    }
+                });
+                return config;
+            }
             config.store();
         }
         config
@@ -563,6 +596,10 @@ impl Config2 {
     }
 
     fn store(&self) {
+        self.store_with(|stored| Config::store_(stored, "2"));
+    }
+
+    fn store_with(&self, persist: impl FnOnce(&Self)) {
         let mut config = self.clone();
         let stored = match try_load_path_for_store::<Self>(Self::file()) {
             Ok(mut stored) => {
@@ -601,7 +638,7 @@ impl Config2 {
         }
         config.unlock_pin =
             keep_encrypted_storage_if_plaintext_unchanged(&config.unlock_pin, &stored.unlock_pin);
-        Config::store_(&config, "2");
+        persist(&config);
     }
 
     pub fn get_trusted_devices_v2() -> crate::ResultType<String> {
@@ -3364,6 +3401,20 @@ mod tests {
 
     #[test]
     fn unlock_pin_migration_keeps_the_source_until_the_service_saves_it() {
+        #[cfg(windows)]
+        fn icacls(path: &Path, args: &[&str]) -> Vec<u8> {
+            let result = std::process::Command::new("icacls")
+                .arg(path)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            result.stdout
+        }
         let dir = std::env::temp_dir().join(format!("rd-pin-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let file = dir.join("config2.toml");
@@ -3373,6 +3424,18 @@ mod tests {
             ..Default::default()
         };
         store_path(file.clone(), &original).unwrap();
+        #[cfg(windows)]
+        let acl = {
+            icacls(&file, &["/inheritance:d"]);
+            icacls(&file, &[])
+        };
+        let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(86_400);
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
         assert!(Config2::migrate_unlock_pin_at(&file, |_| Err(anyhow!("write failed"))).is_err());
         assert_eq!(try_load_path::<Config2>(file.clone()).unwrap(), original);
         Config2::migrate_unlock_pin_at(&file, |pin| {
@@ -3380,9 +3443,13 @@ mod tests {
             Ok(())
         })
         .unwrap();
+        assert_eq!(fs::metadata(&file).unwrap().modified().unwrap(), modified);
+        #[cfg(windows)]
+        assert_eq!(icacls(&file, &[]), acl);
         let migrated: Config2 = try_load_path(file).unwrap();
-        assert!(migrated.unlock_pin.is_empty());
-        assert_eq!(migrated.nat_type, original.nat_type);
+        let mut expected = original;
+        expected.unlock_pin.clear();
+        assert_eq!(migrated, expected);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

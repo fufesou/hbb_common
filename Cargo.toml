@@ -79,10 +79,15 @@ mac_address = "1.1"
 default_net = { git = "https://github.com/rustdesk-org/default_net" }
 machine-uid = { git = "https://github.com/rustdesk-org/machine-uid" }
 
+[target.'cfg(windows)'.dependencies]
+tempfile = "3"
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
+
 [build-dependencies]
 protobuf-codegen = { version = "3.7" }
 
 [dev-dependencies]
+tempfile = "3"
 clap = "4.5.51"
 webrtc = "0.13.0" # keep in lockstep with [dependencies] webrtc (rustc 1.75 pin, see above)
 
